@@ -1,7 +1,60 @@
-venv/
-.venv/
+# Python cache
 __pycache__/
+*.py[cod]
+*$py.class
 *.pyc
-.pytest_cache/
+*.pyo
+*.pyd
+
+# Environment files
 .env
 **/.env
+
+# Python Virtual Environments
+ecwf-venv/
+venv/
+.venv/
+env/
+
+# Also ignore them if they appear inside subdirectories
+**/ecwf-venv/
+**/venv/
+**/.venv/
+
+# VS Code
+.vscode/
+**/.vscode/
+
+# Docker local override files
+docker-compose.override.yml
+compose.override.yml
+
+# Temporary files
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+**/logs/
+
+# Build / Package files
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Python tooling / cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+.cache/
