@@ -1,0 +1,102 @@
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      AUTH_DB_USER: ${AUTH_DB_USER}
+      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD}
+      USER_DB_USER: ${USER_DB_USER}
+      USER_DB_PASSWORD: ${USER_DB_PASSWORD}
+      TENANT_ADMIN_DB_USER: ${TENANT_ADMIN_DB_USER}
+      TENANT_ADMIN_DB_PASSWORD: ${TENANT_ADMIN_DB_PASSWORD}
+    ports:
+      - "3307:3306"
+    volumes:
+      - ecwf_db_data:/var/lib/mysql
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  authentication-service:
+    build: ./services/authentication-service
+    env_file:
+      - ./.env
+      - ./services/authentication-service/.env
+    ports:
+      - "8001:8001"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: on-failure
+
+  # Owned by the User Service teammate. Uncomment when the service is implemented.
+  # user-service:
+  #   build: ./services/user-service
+  #   env_file:
+  #     - ./.env
+  #     - ./services/user-service/.env
+  #   ports:
+  #     - "8002:8002"
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #     authentication-service:
+  #       condition: service_healthy
+  #   command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8002"
+  #   healthcheck:
+  #     test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 20
+  #     start_period: 10s
+  #   restart: on-failure
+
+  # Owned by the Tenant Admin Service teammate. Uncomment when the service is implemented.
+  # tenant-admin-service:
+  #   build: ./services/tenant-admin-service
+  #   env_file:
+  #     - ./.env
+  #     - ./services/tenant-admin-service/.env
+  #   ports:
+  #     - "8003:8003"
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #     authentication-service:
+  #       condition: service_healthy
+  #     # user-service:
+  #     #   condition: service_healthy
+  #   command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8003"
+  #   healthcheck:
+  #     test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 20
+  #     start_period: 10s
+  #   restart: on-failure
+
+  api-gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "8000:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      authentication-service:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ecwf_db_data:

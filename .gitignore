@@ -1,60 +1,25 @@
-# Python cache
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.pyc
-*.pyo
-*.pyd
-
-# Environment files
-.env
-**/.env
-
-# Python Virtual Environments
-ecwf-venv/
-venv/
+*.egg-info/
+.pytest_cache/
 .venv/
-env/
+venv/
+mecwf_venv/
 
-# Also ignore them if they appear inside subdirectories
-**/ecwf-venv/
-**/venv/
-**/.venv/
+# Environment files (real credentials live only in local .env files)
+.env
+!.env.example
 
-# VS Code
+# Local databases
+*.db
+*.sqlite3
+
+# IDE / OS
 .vscode/
-**/.vscode/
-
-# Docker local override files
-docker-compose.override.yml
-compose.override.yml
-
-# Temporary files
+.idea/
 .DS_Store
 Thumbs.db
-*.tmp
-*.temp
-*.swp
-*.swo
-*~
 
-# Logs
-*.log
-logs/
-**/logs/
-
-# Build / Package files
-build/
-dist/
-*.egg-info/
-.eggs/
-
-# Python tooling / cache
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-
-.cache/
+# Docker
+services/*/auth_dev.db
