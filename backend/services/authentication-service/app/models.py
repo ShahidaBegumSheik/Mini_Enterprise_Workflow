@@ -1,3 +1,5 @@
+"""Database models owned by the Authentication Service (single source file)."""
+
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Integer, String
@@ -5,6 +7,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.utils import utcnow
 from app.database.base import Base
+
+__all__ = ["AuthCredential"]
 
 
 class AuthCredential(Base):

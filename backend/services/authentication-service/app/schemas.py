@@ -1,5 +1,7 @@
+"""Request/response schemas for the Authentication Service (single source file)."""
+
 import re
-from datetime import datetime
+from typing import Literal
 
 from pydantic import (
     BaseModel,
@@ -10,6 +12,15 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.config import settings
+
+__all__ = [
+    "MessageResponse",
+    "RegisterRequest",
+    "OTPVerifyRequest",
+    "RegistrationVerifiedResponse",
+]
+
 PERSONAL_EMAIL_DOMAINS = {
     "gmail.com",
     "yahoo.com",
@@ -17,6 +28,12 @@ PERSONAL_EMAIL_DOMAINS = {
     "hotmail.com",
     "icloud.com",
 }
+
+AccountType = Literal["individual", "organization"]
+
+
+def email_domain(email: str) -> str:
+    return str(email).rsplit("@", 1)[1].lower()
 
 
 def validate_password_strength(value: str) -> str:
@@ -51,16 +68,28 @@ def validate_password_strength(value: str) -> str:
     return value
 
 
+class MessageResponse(BaseModel):
+    message: str
+    remaining_attempts: int | None = None
+    resend_count: int | None = None
+    expires_in: int | None = None
+
+
 class RegisterRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=150)
     email: EmailStr
     password: str = Field(min_length=8, max_length=72)
     confirm_password: str = Field(min_length=8, max_length=72)
-    account_type: str = Field(pattern="^(individual|organization)$")
+    account_type: AccountType
 
     organization_name: str | None = Field(default=None, min_length=2, max_length=150)
     organization_type: str | None = "enterprise"
     industry: str | None = None
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        return value.strip().lower()
 
     @field_validator("password")
     @classmethod
@@ -71,59 +100,25 @@ class RegisterRequest(BaseModel):
     def validate_registration(self):
         if self.password != self.confirm_password:
             raise ValueError("Password and confirm password must match")
-        domain = str(self.email).rsplit("@", 1)[1].lower()
 
-        if self.account_type == "individual" and domain not in PERSONAL_EMAIL_DOMAINS:
+        if self.account_type == "individual" and email_domain(self.email) not in PERSONAL_EMAIL_DOMAINS:
             raise ValueError("Individual accounts must use a supported personal email address")
 
-        if self.account_type == "organization" and domain in PERSONAL_EMAIL_DOMAINS:
-            raise ValueError("Organization accounts must use an official business email address")
-
-        if self.account_type == "organization" and not self.organization_name:
-            raise ValueError("Organization name is required")
+        if self.account_type == "organization":
+            if email_domain(self.email) in PERSONAL_EMAIL_DOMAINS:
+                raise ValueError("Organization accounts must use an official business email address")
+            if not self.organization_name:
+                raise ValueError("Organization name is required")
 
         return self
 
 
 class OTPVerifyRequest(BaseModel):
-    otp: str = Field(min_length=4, max_length=6, pattern=r"^\d{4,6}$")
-
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class ForgotPasswordRequest(BaseModel):
-    email: EmailStr
-
-
-class ResetPasswordRequest(BaseModel):
-    new_password: str = Field(min_length=8, max_length=72)
-    confirm_password: str = Field(min_length=8, max_length=72)
-
-    @field_validator("new_password")
-    @classmethod
-    def validate_new_password(cls, value: str) -> str:
-        return validate_password_strength(value)
-
-    @model_validator(mode="after")
-    def validate_passwords(self):
-        if self.new_password != self.confirm_password:
-            raise ValueError("Password and confirm password must match")
-        return self
-
-
-class AuthUserInfo(BaseModel):
-    user_id: int
-    email: EmailStr
-    account_type: str
-    organization_id: int | None = None
-    is_active: bool = True
-    is_verified: bool = True
-    created_at: datetime | None = None
-
-    model_config = ConfigDict(extra="allow")
+    otp: str = Field(
+        min_length=settings.otp_length,
+        max_length=settings.otp_length,
+        pattern=r"^\d+$",
+    )
 
 
 class RegistrationVerifiedResponse(BaseModel):
@@ -133,17 +128,4 @@ class RegistrationVerifiedResponse(BaseModel):
     account_type: str
     organization: dict | None = None
 
-
-class LoginResponse(BaseModel):
-    message: str
-    user: AuthUserInfo
-
-
-class TokenContextResponse(BaseModel):
-    user_id: int
-    email: EmailStr
-    account_type: str
-    organization_id: int | None = None
-    token_version: int
-    is_active: bool
-    is_verified: bool
+    model_config = ConfigDict(extra="allow")

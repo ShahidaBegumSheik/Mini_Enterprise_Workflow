@@ -1,125 +1,126 @@
 import os
+import tempfile
+from contextlib import asynccontextmanager
+from pathlib import Path
 
-os.environ.setdefault("DATABASE_URL", "sqlite://")
-os.environ.setdefault("INTERNAL_API_KEY", "test-internal-key")
-os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-key-0123456789")
-os.environ.setdefault("JWT_ISSUER", "mecwf-authentication-service")
-os.environ.setdefault("JWT_AUDIENCE", "mecwf-services")
-os.environ.setdefault("OTP_LENGTH", "6")
-os.environ.setdefault("OTP_EXPIRE_MINUTES", "5")
-os.environ.setdefault("OTP_MAX_ATTEMPTS", "5")
-os.environ.setdefault("OTP_MAX_RESENDS", "3")
-os.environ.setdefault("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
-os.environ.setdefault("REFRESH_TOKEN_EXPIRE_DAYS", "7")
-os.environ.setdefault("SMTP_ENABLED", "false")
-os.environ.setdefault("ENABLE_EXTERNAL_SERVICES", "true")
+os.environ["INTERNAL_API_KEY"] = "test-internal-key"
+os.environ["JWT_SECRET_KEY"] = "test-jwt-secret-key-0123456789abcdef0123456789abcdef"
+os.environ["JWT_ALGORITHM"] = "HS256"
+os.environ["JWT_ISSUER"] = "test-issuer"
+os.environ["JWT_AUDIENCE"] = "test-audience"
+os.environ["OTP_ENCRYPTION_KEY"] = ""
+os.environ["OTP_TOKEN_COOKIE_NAME"] = "otp_token"
+os.environ["OTP_LENGTH"] = "6"
+os.environ["OTP_EXPIRE_MINUTES"] = "5"
+os.environ["OTP_MAX_ATTEMPTS"] = "5"
+os.environ["OTP_MAX_RESENDS"] = "3"
+os.environ["COOKIE_SECURE"] = "false"
+os.environ["COOKIE_SAMESITE"] = "lax"
+os.environ["COOKIE_PATH"] = "/"
+os.environ["SMTP_ENABLED"] = "false"
+os.environ["DATABASE_URL"] = "sqlite:///:memory:?cache=shared"
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
-from app import models  # noqa: F401  registers models on Base.metadata
 from app.database.base import Base
-from app.database.session import get_db
 from app.main import app
-from app.repositories.auth_repository import AuthRepository
-from app.routers.auth import service as auth_service_dependency
-from app.services.auth import AuthService
+from app.repositories import AuthRepository
+from app.routers.dependencies import get_service
+from app.services import AuthService
 
 from tests.fakes import FakeTenantClient, FakeUserClient
 
+ENGINE_PATH = Path(tempfile.mkdtemp()) / "test_auth.db"
 
-@pytest.fixture
-def db_session_factory():
+VALID_INDIVIDUAL = {
+    "full_name": "Alice Personal",
+    "email": "alice.personal@gmail.com",
+    "password": "Str0ngPassw#ord",
+    "confirm_password": "Str0ngPassw#ord",
+    "account_type": "individual",
+}
+
+VALID_ORGANIZATION = {
+    "full_name": "Bob Enterprise",
+    "email": "bob.ops@acmecorp.io",
+    "password": "Str0ngPassw#ord",
+    "confirm_password": "Str0ngPassw#ord",
+    "account_type": "organization",
+    "organization_name": "AcmeCorp",
+    "organization_type": "enterprise",
+    "industry": "software",
+}
+
+
+@pytest.fixture(scope="session")
+def engine():
     engine = create_engine(
-        "sqlite://",
+        f"sqlite:///{ENGINE_PATH}",
         connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    yield Session
+    yield engine
+
+
+@pytest.fixture
+def session_factory(engine):
     Base.metadata.drop_all(engine)
-    engine.dispose()
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
 @pytest.fixture
-def session(db_session_factory):
-    db = db_session_factory()
-    yield db
-    db.close()
+def fakes():
+    return FakeUserClient(), FakeTenantClient()
 
 
-@pytest.fixture
-def repo(session):
-    return AuthRepository(session)
-
-
-@pytest.fixture
-def user_client():
-    return FakeUserClient()
-
-
-@pytest.fixture
-def tenant_client():
-    return FakeTenantClient()
-
-
-@pytest.fixture
-def fakes(user_client, tenant_client):
-    return user_client, tenant_client
-
-
-@pytest.fixture
-def auth_service(repo, fakes):
-    return AuthService(repo, fakes[0], fakes[1])
-
-
-@pytest.fixture
-def otp_fixture(monkeypatch):
-    """Force deterministic OTP codes; resends cycle to the next value."""
-    import app.services.auth as auth_module
-
-    state = {"index": 0, "values": ["123456", "654321"]}
-
-    def fake_generate_otp():
-        value = state["values"][state["index"] % len(state["values"])]
-        state["index"] += 1
-        return value
-
-    monkeypatch.setattr(auth_module, "generate_otp", fake_generate_otp)
-    return state
-
-
-@pytest.fixture
-def api(db_session_factory):
-    Session = db_session_factory
-    fakes = {"user": FakeUserClient(), "tenant": FakeTenantClient()}
-    app.state.test_fakes = fakes
-
-    def override_get_db():
-        db = Session()
+def _dependency(fakes, session_factory):
+    def _get_service():
+        db = session_factory()
         try:
-            yield db
+            yield AuthService(AuthRepository(db), fakes[0], fakes[1])
         finally:
             db.close()
 
-    async def override_service():
-        db = Session()
-        try:
-            yield AuthService(
-                AuthRepository(db), fakes["user"], fakes["tenant"]
-            )
-        finally:
-            db.close()
+    return _get_service
 
-    app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[auth_service_dependency] = override_service
 
-    with TestClient(app) as test_client:
-        yield test_client, fakes
+@asynccontextmanager
+async def _lifespan_client():
+    transport = httpx.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            yield client
 
-    app.dependency_overrides.clear()
-    app.state.test_fakes = None
+
+@pytest.fixture
+async def client(session_factory, fakes):
+    app.dependency_overrides[get_service] = _dependency(fakes, session_factory)
+    try:
+        async with _lifespan_client() as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(get_service, None)
+
+
+@pytest.fixture
+async def service(fakes, session_factory):
+    service = AuthService(AuthRepository(session_factory()), fakes[0], fakes[1])
+    yield service
+
+
+def otp_from_cookie(client) -> str:
+    from app.core.security import open_otp_flow
+
+    token = client.cookies.get("otp_token")
+    assert token, "expected an otp_token cookie"
+    return open_otp_flow(token)["otp"]
+
+
+def register(client, payload):
+    return client.post("/api/v1/auth/register", json=payload)

@@ -1,74 +1,98 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
-from app.core.config import settings
-from app.core.security import (
-    create_access_token,
-    create_refresh_token,
-    decode_token,
-    generate_otp,
-    hash_otp,
-    hash_password,
-    hash_token,
-    verify_otp,
-    verify_password,
-)
+from app import core
+from app.core import security as security_module
+from app.core.security import open_otp_flow, seal_otp_flow
 
 
-def test_generate_otp_has_configured_length():
-    code = generate_otp()
-    assert len(code) == settings.otp_length
-    assert code.isdigit()
+def make_flow(exp_at=None):
+    payload = {
+        "purpose": "registration",
+        "email": "alice@test.dev",
+        "account_type": "individual",
+        "otp": "123456",
+        "attempts": 0,
+        "resends": 0,
+    }
+    return seal_otp_flow(payload, exp_at=exp_at)
 
 
-def test_password_hash_and_verify_roundtrip():
-    encoded = hash_password("Abcdef1!")
-    assert verify_password("Abcdef1!", encoded)
-    assert not verify_password("wrong-password", encoded)
+class TestGenerateOtp:
+    def test_digits_only(self):
+        otp = security_module.generate_otp()
+        assert otp.isdigit()
+
+    def test_default_length_from_settings(self):
+        assert len(security_module.generate_otp()) == 6
+
+    def test_custom_length(self):
+        assert len(security_module.generate_otp(length=8)) == 8
+
+    def test_probably_unique(self):
+        seen = {security_module.generate_otp() for _ in range(50)}
+        assert len(seen) > 40
 
 
-def test_otp_hash_and_verify_roundtrip():
-    encoded = hash_otp("123456")
-    assert verify_otp("123456", encoded)
-    assert not verify_otp("000000", encoded)
+class TestCompareOtp:
+    def test_match(self):
+        assert security_module.compare_otp("123456", "123456") is True
+
+    def test_mismatch(self):
+        assert security_module.compare_otp("123456", "654321") is False
 
 
-def test_access_token_roundtrip():
-    token = create_access_token(42, version=3)
-    payload = decode_token(token)
-    assert payload["sub"] == "42"
-    assert payload["type"] == "access"
-    assert payload["ver"] == 3
-    assert payload["iss"] == settings.jwt_issuer
-    assert payload["aud"] == settings.jwt_audience
+class TestOtpFlowToken:
+    def test_roundtrip_returns_payload(self):
+        token = make_flow()
+        opened = open_otp_flow(token)
+        assert opened["purpose"] == "registration"
+        assert opened["email"] == "alice@test.dev"
+        assert opened["otp"] == "123456"
+        assert opened["attempts"] == 0
+
+    def test_otp_not_visible_in_raw_token(self):
+        token = make_flow()
+        assert "123456" not in token
+
+    def test_expired_token_rejected(self):
+        expired = datetime.now(timezone.utc) - timedelta(minutes=1)
+        with pytest.raises(ValueError, match="OTP has expired"):
+            open_otp_flow(make_flow(exp_at=expired))
+
+    def test_tampered_token_rejected(self):
+        token = make_flow()
+        tampered = token[:-4] + ("AAAA" if not token.endswith("AAAA") else "BBBB")
+        with pytest.raises(ValueError):
+            open_otp_flow(tampered)
+
+    def test_wrong_encryption_key_rejected(self):
+        from cryptography.fernet import Fernet
+
+        token = make_flow()
+        security_module._fernet_instance = None
+        original = core.config.settings.otp_encryption_key
+        try:
+            core.config.settings.otp_encryption_key = Fernet.generate_key().decode()
+            with pytest.raises(ValueError):
+                open_otp_flow(token)
+        finally:
+            security_module._fernet_instance = None
+            core.config.settings.otp_encryption_key = original
 
 
-def test_refresh_token_roundtrip():
-    token = create_refresh_token(7)
-    payload = decode_token(token)
-    assert payload["type"] == "refresh"
-    assert payload["sub"] == "7"
+class TestPasswords:
+    def test_hash_and_verify(self):
+        encoded = security_module.hash_password("Str0ngPassw#ord")
+        assert encoded != "Str0ngPassw#ord"
+        assert security_module.verify_password("Str0ngPassw#ord", encoded)
 
+    def test_wrong_password(self):
+        encoded = security_module.hash_password("Str0ngPassw#ord")
+        assert not security_module.verify_password("WrongPassw#ord1", encoded)
 
-def test_decode_invalid_token_raises():
-    with pytest.raises(ValueError):
-        decode_token("not-a-valid-token")
-
-
-def test_decode_token_wrong_secret_raises():
-    from jose import jwt as jose_jwt
-    from datetime import datetime, timedelta, timezone
-
-    bogus = jose_jwt.encode(
-        {"sub": "1"},
-        "totally-different-secret",
-        algorithm="HS256",
-        headers=None,
-    )
-    with pytest.raises(ValueError):
-        decode_token(bogus)
-
-
-def test_hash_token_is_sha256_hex():
-    assert len(hash_token("some-token")) == 64
-    assert hash_token("abc") == hash_token("abc")
-    assert hash_token("abc") != hash_token("abd")
+    def test_hashes_are_salted(self):
+        first = security_module.hash_password("Str0ngPassw#ord")
+        second = security_module.hash_password("Str0ngPassw#ord")
+        assert first != second

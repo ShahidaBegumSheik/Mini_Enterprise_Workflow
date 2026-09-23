@@ -11,6 +11,15 @@ class ServiceCallError(Exception):
         super().__init__(f"{service} returned {status_code}: {detail}")
 
 
+class ServiceResponseError(Exception):
+    """Raised when a downstream microservice returns a malformed/invalid body."""
+
+    def __init__(self, service: str, detail: str = "") -> None:
+        self.service = service
+        self.detail = detail
+        super().__init__(f"{service} returned an invalid response: {detail}")
+
+
 # ---------------------------------------------------------------------------
 # User Service contract
 # ---------------------------------------------------------------------------
@@ -65,7 +74,7 @@ class TenantAdminServiceContract(Protocol):
     """
 
     async def create_organization(
-        self, payload: dict[str, Any], *, access_token: str
+        self, payload: dict[str, Any], *, access_token: str = ""
     ) -> dict[str, Any]:
         ...
 

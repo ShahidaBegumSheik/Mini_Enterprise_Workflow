@@ -16,13 +16,11 @@ class Settings(BaseSettings):
     http_timeout_seconds: float = 15.0
     http_connect_timeout_seconds: float = 5.0
 
-    # JWT
+    # JWT (used for the signed OTP flow token)
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
     jwt_issuer: str = "mecwf-authentication-service"
     jwt_audience: str = "mecwf-services"
-    access_token_expire_minutes: int = 30
-    refresh_token_expire_days: int = 7
 
     # OTP
     otp_length: int = 6
@@ -30,12 +28,14 @@ class Settings(BaseSettings):
     otp_max_attempts: int = 5
     otp_max_resends: int = 3
 
-    # HTTP-only cookies
-    registration_otp_cookie_name: str = "registration_otp_token"
-    password_reset_otp_cookie_name: str = "password_reset_otp_token"
-    password_reset_verified_cookie_name: str = "password_reset_verified_token"
-    access_cookie_name: str = "access_token"
-    refresh_cookie_name: str = "refresh_token"
+    # Base64-urlsafe 32-byte Fernet key used to encrypt the OTP (and the rest
+    # of the sensitive flow payload) inside the short-lived OTP flow token.
+    # When empty it is derived from JWT_SECRET_KEY so development works out
+    # of the box; production deployments should set an explicit key.
+    otp_encryption_key: str = ""
+
+    # OTP flow token cookie
+    otp_token_cookie_name: str = "otp_token"
 
     cookie_secure: bool = False
     cookie_samesite: str = "lax"
