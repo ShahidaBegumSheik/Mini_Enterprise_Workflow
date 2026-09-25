@@ -19,6 +19,9 @@ __all__ = [
     "RegisterRequest",
     "OTPVerifyRequest",
     "RegistrationVerifiedResponse",
+    "LoginRequest",
+    "LoginResponse",
+    "RefreshResponse",
 ]
 
 PERSONAL_EMAIL_DOMAINS = {
@@ -129,3 +132,38 @@ class RegistrationVerifiedResponse(BaseModel):
     organization: dict | None = None
 
     model_config = ConfigDict(extra="allow")
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1)
+
+
+class LoginResponse(BaseModel):
+    """Safe login payload.
+
+    Deliberately contains NO raw JWTs — access/refresh tokens travel only in
+    HttpOnly cookies. ``session_id`` and expiries are safe metadata.
+    """
+
+    message: str
+    user_id: int
+    email: EmailStr
+    account_type: str
+    session_id: str
+    access_token_expires_in: int
+    refresh_token_expires_in: int
+
+
+class RefreshResponse(BaseModel):
+    """Safe refresh payload.
+
+    Deliberately contains NO raw JWTs — the rotated access/refresh tokens
+    travel only in HttpOnly cookies. ``session_id`` is the new session id.
+    """
+
+    message: str
+    user_id: int
+    session_id: str
+    access_token_expires_in: int
+    refresh_token_expires_in: int

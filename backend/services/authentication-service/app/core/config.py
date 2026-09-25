@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     # OTP flow token cookie
     otp_token_cookie_name: str = "otp_token"
 
+    # Access / refresh session tokens
+    access_token_expire_minutes: int = 30
+    refresh_token_expire_days: int = 7
+
+    # Session cookies (set on login, read back by get_current_user)
+    access_cookie_name: str = "access_token"
+    refresh_cookie_name: str = "refresh_token"
+
     cookie_secure: bool = False
     cookie_samesite: str = "lax"
     cookie_domain: str | None = None

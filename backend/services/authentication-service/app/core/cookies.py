@@ -32,3 +32,26 @@ def clear_otp_token_cookie(response: Response) -> None:
         settings.otp_token_cookie_name,
         **{k: v for k, v in _options(0).items() if k != "max_age"},
     )
+
+
+def set_access_token_cookie(response: Response, value: str) -> None:
+    """Set the HttpOnly access token cookie. Token is never sent in the body."""
+    response.set_cookie(
+        settings.access_cookie_name,
+        value,
+        **_options(settings.access_token_expire_minutes * 60),
+    )
+
+
+def set_refresh_token_cookie(response: Response, value: str) -> None:
+    """Set the HttpOnly refresh token cookie. Token is never sent in the body."""
+    response.set_cookie(
+        settings.refresh_cookie_name,
+        value,
+        **_options(settings.refresh_token_expire_days * 24 * 60 * 60),
+    )
+
+
+def clear_auth_cookies(response: Response) -> None:
+    for name in (settings.access_cookie_name, settings.refresh_cookie_name):
+        response.delete_cookie(name, **{k: v for k, v in _options(0).items() if k != "max_age"})

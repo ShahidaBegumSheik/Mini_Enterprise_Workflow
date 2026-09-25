@@ -124,3 +124,36 @@ def otp_from_cookie(client) -> str:
 
 def register(client, payload):
     return client.post("/api/v1/auth/register", json=payload)
+
+
+_seed_user_id = 9000
+
+
+def seed_credential(
+    session_factory,
+    *,
+    email: str = "alice.session@gmail.com",
+    password: str = "Str0ngPassw#ord",
+    user_id: int | None = None,
+    account_type: str = "individual",
+    is_active: bool = True,
+    is_verified: bool = True,
+):
+    """Create a credential directly (bypasses registration) for login tests."""
+    global _seed_user_id
+    from app.core.security import hash_password
+
+    repo = AuthRepository(session_factory())
+    _seed_user_id += 1
+    return repo.create_credential(
+        user_id=user_id or _seed_user_id,
+        email=email,
+        password_hash=hash_password(password),
+        account_type=account_type,
+        is_active=is_active,
+        is_verified=is_verified,
+    )
+
+
+def login_payload(email: str = "alice.session@gmail.com", password: str = "Str0ngPassw#ord"):
+    return {"email": email, "password": password}

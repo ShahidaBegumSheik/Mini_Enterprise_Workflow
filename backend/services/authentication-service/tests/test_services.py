@@ -43,7 +43,8 @@ class TestVerifyOtp:
     async def test_wrong_otp_increments_attempts(self, service):
         result = await service.register(model(VALID_INDIVIDUAL))
         flow = open_otp_flow(result["token"])
-        wrong = "0" + flow["otp"][1:]
+        wrong = str((int(flow["otp"]) + 1) % 10**6).zfill(6)
+        assert wrong != flow["otp"]
         with pytest.raises(InvalidOTPError) as exc:
             await service.verify_otp(result["token"], wrong)
         assert exc.value.remaining_attempts == 4

@@ -1,5 +1,6 @@
 """Business logic and email delivery for the Authentication Service (single source file)."""
 
+import secrets
 import smtplib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -13,12 +14,18 @@ from app.clients.tenant_admin_service import TenantAdminServiceClient
 from app.clients.user_service import UserServiceClient
 from app.core.config import settings
 from app.core.security import (
+    TokenError,
     compare_otp,
+    create_access_token,
+    create_refresh_token,
     generate_otp,
     hash_password,
     open_otp_flow,
     seal_otp_flow,
+    validate_refresh_token,
+    verify_password,
 )
+from app.core.utils import utcnow
 from app.repositories import AuthRepository
 from app.schemas import RegisterRequest
 
@@ -179,6 +186,163 @@ class AuthService:
         )
         await self._send_otp(email, otp)
         return {"token": token, "expires_in": settings.otp_expire_minutes * 60}
+
+    async def login(
+        self,
+        email: str,
+        password: str,
+        *,
+        device_info: str | None = None,
+        ip_address: str | None = None,
+    ) -> dict[str, Any]:
+        """Authenticate a principal against this service's credential store.
+
+        Credentials (email + password hash + status) are owned by this
+        service's own database; the User Service is never reached directly
+        and profile data is resolved later through the User Service contract.
+        """
+        credential = self.repo.credential_by_email(email.lower())
+        if credential is None or not verify_password(password, credential.password_hash):
+            raise HTTPException(status_code=401, detail="Incorrect email or password")
+
+        if not credential.is_active:
+            raise HTTPException(status_code=403, detail="Account is inactive")
+        if not credential.is_verified:
+            raise HTTPException(status_code=403, detail="Account is not verified")
+
+        session_id = secrets.token_hex(16)
+        expires_at = utcnow() + timedelta(days=settings.refresh_token_expire_days)
+        self.repo.create_refresh_session(
+            session_id=session_id,
+            user_id=credential.user_id,
+            expires_at=expires_at,
+            device_info=device_info,
+            ip_address=ip_address,
+        )
+
+        access_token = create_access_token(
+            credential.user_id,
+            token_version=credential.token_version,
+            session_id=session_id,
+        )
+        refresh_token = create_refresh_token(
+            credential.user_id,
+            token_version=credential.token_version,
+            session_id=session_id,
+            jti=session_id,
+        )
+
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "user_id": credential.user_id,
+            "email": credential.email,
+            "account_type": credential.account_type,
+            "session_id": session_id,
+            "access_token_expires_in": settings.access_token_expire_minutes * 60,
+            "refresh_token_expires_in": settings.refresh_token_expire_days * 24 * 60 * 60,
+        }
+
+    async def refresh(
+        self,
+        refresh_token: str,
+        *,
+        device_info: str | None = None,
+        ip_address: str | None = None,
+    ) -> dict[str, Any]:
+        """Rotate a valid refresh token into a fresh session.
+
+        Order: signature/expiry/type validation, then session-state validation,
+        then rotation. The old session is revoked and linked to the new one via
+        ``replaced_by`` so that presenting an already-rotated token (reuse) can
+        be detected and the entire token family revoked.
+        """
+        try:
+            claims = validate_refresh_token(refresh_token)
+        except TokenError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+        session_id = claims.get("sid") or claims.get("jti")
+        if not session_id:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+        session = self.repo.refresh_session_by_id(session_id)
+        if session is None:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+        if session.revoked_at is not None:
+            # Already rotated or revoked: this is a reuse/revoked-token attempt.
+            # Kill the whole refresh family, then reject.
+            self.repo.revoke_refresh_family(session_id)
+            raise HTTPException(
+                status_code=401, detail="Refresh token has been revoked"
+            ) from None
+        try:
+            sub = int(claims["sub"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=401, detail="Invalid refresh token") from exc
+        if sub != session.user_id:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+        if session.expires_at <= utcnow():
+            self.repo.revoke_refresh_session(session_id)
+            raise HTTPException(status_code=401, detail="Refresh token has expired")
+
+        credential = self.repo.credential_by_user_id(session.user_id)
+        if credential is None or not credential.is_active or not credential.is_verified:
+            self.repo.revoke_refresh_family(session_id)
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+        new_session_id = secrets.token_hex(16)
+        expires_at = utcnow() + timedelta(days=settings.refresh_token_expire_days)
+        self.repo.create_refresh_session(
+            session_id=new_session_id,
+            user_id=credential.user_id,
+            expires_at=expires_at,
+            device_info=device_info,
+            ip_address=ip_address,
+        )
+        self.repo.revoke_refresh_session(session_id, replaced_by=new_session_id)
+
+        access_token = create_access_token(
+            credential.user_id,
+            token_version=credential.token_version,
+            session_id=new_session_id,
+        )
+        new_refresh_token = create_refresh_token(
+            credential.user_id,
+            token_version=credential.token_version,
+            session_id=new_session_id,
+            jti=new_session_id,
+        )
+
+        return {
+            "access_token": access_token,
+            "refresh_token": new_refresh_token,
+            "user_id": credential.user_id,
+            "session_id": new_session_id,
+            "access_token_expires_in": settings.access_token_expire_minutes * 60,
+            "refresh_token_expires_in": settings.refresh_token_expire_days * 24 * 60 * 60,
+        }
+
+    async def logout(self, refresh_token: str | None) -> dict[str, Any]:
+        """Revoke the session tied to this refresh token, if any.
+
+        Idempotent and safe when the token is missing, malformed or already
+        revoked. Never raises; the caller always clears the auth cookies.
+        """
+        if not refresh_token:
+            return {"revoked": False}
+        try:
+            claims = validate_refresh_token(refresh_token)
+        except TokenError:
+            return {"revoked": False}
+
+        session_id = claims.get("sid") or claims.get("jti")
+        session = self.repo.refresh_session_by_id(session_id) if session_id else None
+        if session is None or session.revoked_at is not None:
+            return {"revoked": False}
+
+        self.repo.revoke_refresh_session(session_id)
+        return {"revoked": True}
 
     async def resend_otp(self, token: str) -> dict[str, Any]:
         flow = self._open_flow(token)
