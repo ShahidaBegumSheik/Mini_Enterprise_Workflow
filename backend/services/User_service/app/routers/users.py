@@ -25,7 +25,7 @@ router = APIRouter(
 def get_profile(
     db: Session = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
-):
+) -> UserResponse:
     return get_user(
         db=db,
         user_id=user_id,
@@ -42,7 +42,7 @@ def update_profile(
     data: UserUpdate,
     db: Session = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
-):
+) -> UserResponse:
     return update_user_profile(
         db=db,
         user_id=user_id,
