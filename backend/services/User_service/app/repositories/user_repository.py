@@ -1,3 +1,6 @@
+from collections.abc import Mapping
+from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -23,9 +26,8 @@ def get_user_by_email(
 def update_user(
     db: Session,
     user: User,
-    data: dict,
+    data: Mapping[str, Any],
 ) -> User:
-
     for field, value in data.items():
         setattr(user, field, value)
 
