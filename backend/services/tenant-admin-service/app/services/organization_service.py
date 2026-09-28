@@ -1,3 +1,5 @@
+import re
+
 from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -15,21 +17,45 @@ class OrganizationService:
     def __init__(self, db: Session) -> None:
         self.repository = OrganizationRepository(db)
 
+    @staticmethod
+    def _slugify(value: str) -> str:
+        value = value.strip().lower()
+        value = re.sub(r"[^a-z0-9]+", "-", value)
+        value = value.strip("-")
+
+        return value or "organization"
+
+    def _generate_unique_slug(self, name: str) -> str:
+        base_slug = self._slugify(name)
+        slug = base_slug
+        counter = 2
+
+        while self.repository.get_by_slug(slug):
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+
+        return slug
+
     def create_organization(
         self,
         data: OrganizationCreate,
     ) -> Organization:
-        existing = self.repository.get_by_slug(data.slug)
+        if data.slug:
+            slug = self._slugify(data.slug)
 
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Organization slug already exists",
-            )
+            if self.repository.get_by_slug(slug):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Organization slug already exists",
+                )
+        else:
+            slug = self._generate_unique_slug(data.name)
 
         organization = Organization(
             name=data.name,
-            slug=data.slug,
+            slug=slug,
+            organization_type=data.organization_type,
+            industry=data.industry,
             description=data.description,
             email=data.email,
             phone=data.phone,
@@ -41,6 +67,7 @@ class OrganizationService:
 
         try:
             return self.repository.create(organization)
+
         except IntegrityError as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

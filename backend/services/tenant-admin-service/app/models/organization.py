@@ -28,6 +28,17 @@ class Organization(Base):
         index=True,
     )
 
+    organization_type: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        default="enterprise",
+    )
+
+    industry: Mapped[str | None] = mapped_column(
+        String(150),
+        nullable=True,
+    )
+
     description: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,

@@ -5,29 +5,96 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 class OrganizationCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=255)
-    slug: str = Field(..., min_length=2, max_length=255)
+
+    # Authentication Service does not send a slug.
+    # Tenant Admin Service generates it automatically when omitted.
+    slug: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=255,
+    )
+
+    organization_type: str | None = Field(
+        default="enterprise",
+        max_length=100,
+    )
+
+    industry: str | None = Field(
+        default=None,
+        max_length=150,
+    )
+
     description: str | None = None
-    email: str | None = Field(default=None, max_length=255)
-    phone: str | None = Field(default=None, max_length=50)
+
+    email: str | None = Field(
+        default=None,
+        max_length=255,
+    )
+
+    phone: str | None = Field(
+        default=None,
+        max_length=50,
+    )
+
     website: HttpUrl | None = None
+
     address: str | None = None
+
     logo_url: HttpUrl | None = None
-    timezone: str = Field(default="UTC", max_length=100)
+
+    timezone: str = Field(
+        default="UTC",
+        max_length=100,
+    )
 
 
 class OrganizationUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=2, max_length=255)
+    name: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=255,
+    )
+
+    organization_type: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+
+    industry: str | None = Field(
+        default=None,
+        max_length=150,
+    )
+
     description: str | None = None
-    email: str | None = Field(default=None, max_length=255)
-    phone: str | None = Field(default=None, max_length=50)
+
+    email: str | None = Field(
+        default=None,
+        max_length=255,
+    )
+
+    phone: str | None = Field(
+        default=None,
+        max_length=50,
+    )
+
     website: HttpUrl | None = None
+
     address: str | None = None
+
     logo_url: HttpUrl | None = None
-    timezone: str | None = Field(default=None, max_length=100)
+
+    timezone: str | None = Field(
+        default=None,
+        max_length=100,
+    )
 
 
 class OrganizationSettingsUpdate(BaseModel):
-    timezone: str | None = Field(default=None, max_length=100)
+    timezone: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+
     is_active: bool | None = None
 
 
@@ -35,6 +102,10 @@ class OrganizationResponse(BaseModel):
     id: int
     name: str
     slug: str
+
+    organization_type: str | None
+    industry: str | None
+
     description: str | None
     email: str | None
     phone: str | None

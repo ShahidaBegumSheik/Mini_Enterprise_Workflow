@@ -9,10 +9,14 @@ class OrganizationRepository:
         self.db = db
 
     def create(self, organization: Organization) -> Organization:
-        self.db.add(organization)
-        self.db.commit()
-        self.db.refresh(organization)
-        return organization
+        try:
+            self.db.add(organization)
+            self.db.commit()
+            self.db.refresh(organization)
+            return organization
+        except Exception:
+            self.db.rollback()
+            raise
 
     def get_by_id(self, organization_id: int) -> Organization | None:
         statement = select(Organization).where(
@@ -27,7 +31,11 @@ class OrganizationRepository:
         return self.db.execute(statement).scalar_one_or_none()
 
     def update(self, organization: Organization) -> Organization:
-        self.db.add(organization)
-        self.db.commit()
-        self.db.refresh(organization)
-        return organization
+        try:
+            self.db.add(organization)
+            self.db.commit()
+            self.db.refresh(organization)
+            return organization
+        except Exception:
+            self.db.rollback()
+            raise
