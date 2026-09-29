@@ -9,9 +9,13 @@ from app.models.user import User
 
 config = context.config
 
+# ``alembic.ini`` ships with an empty ``sqlalchemy.url``, so the service
+# settings are the default. An explicitly configured URL (a one-off run against
+# another database) still wins.
+database_url = config.get_main_option("sqlalchemy.url") or settings.database_url
 config.set_main_option(
     "sqlalchemy.url",
-    settings.database_url.replace("%", "%%"),
+    database_url.replace("%", "%%"),
 )
 
 
