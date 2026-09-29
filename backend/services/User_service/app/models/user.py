@@ -1,9 +1,24 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, String, Text, func, true
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Index,
+    String,
+    Text,
+    func,
+    true,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
+
+
+#: Columns this service is allowed to write through the public update APIs.
+PROFILE_COLUMNS = ("first_name", "last_name", "phone_number", "bio")
+
+#: Columns that are never accepted from a request body.
+IMMUTABLE_COLUMNS = ("id", "email", "is_active", "created_at", "updated_at")
 
 
 def utc_now() -> datetime:
@@ -11,6 +26,12 @@ def utc_now() -> datetime:
 
 
 class User(Base):
+    """Individual user profile.
+
+    This service owns profile data only. Passwords, credentials, OTP state
+    and tokens live in the Authentication Service and are never stored here.
+    """
+
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(
@@ -66,3 +87,13 @@ class User(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+    __table_args__ = (
+        # Supports the "list active users" access pattern without a full scan.
+        Index("ix_users_is_active", "is_active"),
+        # Supports stable, ordered pagination.
+        Index("ix_users_created_at", "created_at"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging helper
+        return f"<User id={self.id} email={self.email!r} active={self.is_active}>"
