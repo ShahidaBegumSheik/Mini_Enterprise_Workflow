@@ -5,6 +5,8 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     EmailStr,
+    Field,
+    StrictBool,
     StringConstraints,
     field_validator,
 )
@@ -31,6 +33,12 @@ Bio = Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
 
 
 class UserResponse(BaseModel):
+    """Public representation of a user.
+
+    Contains profile data only; no credential or token material is ever
+    serialised, and the Authentication Service keeps ownership of those.
+    """
+
     id: int
     email: EmailStr
     first_name: str
@@ -45,6 +53,13 @@ class UserResponse(BaseModel):
 
 
 class UserUpdate(BaseModel):
+    """Editable profile fields.
+
+    Protected fields (``id``, ``email``, ``is_active``, ``created_at``,
+    ``updated_at``) are rejected: ``extra="forbid"`` turns any attempt to send
+    them into a 422 instead of silently ignoring them.
+    """
+
     first_name: Name | None = None
     last_name: OptionalName | None = None
     phone_number: PhoneNumber | None = None
@@ -79,3 +94,45 @@ class UserUpdate(BaseModel):
     @classmethod
     def normalize_bio(cls, value: str | None) -> str | None:
         return value or None
+
+
+class UserProfileUpdate(UserUpdate):
+    """Profile payload for ``PUT /users/profile`` (the current user)."""
+
+
+class UserStatusUpdate(BaseModel):
+    """Activate / deactivate a user."""
+
+    is_active: StrictBool = Field(
+        description="True activates the user, false deactivates the user.",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class UserListResponse(BaseModel):
+    """Paginated collection of users."""
+
+    items: list[UserResponse] = Field(default_factory=list)
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1)
+    pages: int = Field(ge=0)
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        items: list[UserResponse],
+        total: int,
+        page: int,
+        page_size: int,
+    ) -> "UserListResponse":
+        pages = (total + page_size - 1) // page_size if page_size else 0
+        return cls(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            pages=pages,
+        )
