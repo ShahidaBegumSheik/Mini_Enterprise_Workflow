@@ -7,8 +7,8 @@ Microservices monorepo for the Mini Enterprise Collaboration and Workflow projec
 Three FastAPI microservices share one MySQL server container, each with its own database on it:
 
 | Service | Port | Database | Responsibility | Owner |
-|---|---:|---|---|---|
-| Authentication Service | 8001 | `auth_db` | Registration, OTP, login/logout, refresh, forgot/reset password, internal token validation | This repo (implemented) |
+|---|:--:|---:|---|---|
+| Authentication Service | 8001 | `auth_db` | Registration with email OTP verification | This repo (implemented) |
 | User Service | 8002 | `user_db` | User profile, account settings, individual dashboard | Teammate-owned (not yet implemented) |
 | Tenant Admin Service | 8003 | `tenant_admin_db` | Tenants, memberships, invitations, roles, audit logs | Teammate-owned (not yet implemented) |
 | MySQL | 3307 | — | One server, three databases | — |
@@ -65,17 +65,41 @@ against an empty volume. Each service applies its own Alembic migrations at boot
 
 ## Authentication Service
 
-Owns (read/write): `auth_credentials`, `otp_flows`, `refresh_sessions` in `auth_db`.
+Owns (read/write) `auth_credentials`, `refresh_sessions` and `password_resets`
+in `auth_db` (its own database, using its own Alembic chain headed by
+`alembic_version_auth`). It never creates foreign keys into, or reads from, the
+User Service or Tenant Admin Service databases — `user_id` / `organization_id`
+are stored only as plain external identifiers.
+
+Persistence is strictly auth-owned, safe metadata:
+
+- `auth_credentials` — the credentials needed to authenticate a principal. The
+  password is stored **only** as a bcrypt `password_hash`; never plaintext.
+- `refresh_sessions` — one row per issued refresh token; stores the token's
+  `jti` plus a SHA-256 `token_hash`, issuance/expiry/revocation times and the
+  `replaced_by` chain for rotation. Never stores the raw refresh token.
+- `password_resets` — single-use reset-flow metadata; only a SHA-256
+  `token_hash` and the `consumed_at` marker. Never stores the reset JWT.
+
+The registration/OTP and forgot-password OTP flows are fully stateless — the
+OTP and the flow payload travel encrypted (Fernet) inside signed, short-lived
+HTTP-only cookies (`otp_token`, `reset_otp_token`). No `otp_verifications`
+table exists and no raw OTP is ever persisted. OTP emails are delivered via the
+Notification Service (`POST /api/v1/internal/notifications`), never raw SMTP.
 
 Public API under `/api/v1/auth/*`:
-`register`, `verify-otp`, `resend-otp`, `login`, `refresh-token`, `logout`,
-`forgot-password`, `verify-forgot-otp`, `resend-forgot-otp`, `reset-password`, `me`.
 
-Internal API (hidden from OpenAPI, guarded by `X-Internal-API-Key`):
-`POST /api/v1/auth/internal/validate-token`, `GET .../internal/credentials/by-email`,
-`GET .../internal/credentials/by-user-id`.
+- `POST /register` — validate registration, encrypt the flow, email the OTP
+- `POST /verify-otp` — verify the OTP, create the user (and organization for
+  organization accounts) through the internal service contracts
+- `POST /resend-otp` — send a new OTP (bounded resends, same expiry)
 
-The User Service (`POST /api/v1/internal/users`) and Tenant Admin Service
+Account-type email rules: individual accounts must use a personal email domain
+(gmail/yahoo/outlook/hotmail/icloud); organization accounts must use an official
+business domain and a mandatory `organization_name`.
+
+After successful verification the User Service
+(`POST /api/v1/internal/users`) and Tenant Admin Service
 (`POST /api/v1/internal/organizations`) are called only through HTTPX client
 contracts in `app/clients/`; their behavior is implemented by the owning teams.
 

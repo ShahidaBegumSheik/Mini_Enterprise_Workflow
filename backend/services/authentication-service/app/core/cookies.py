@@ -14,35 +14,76 @@ def _options(max_age: int) -> dict:
     }
 
 
-def set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
+def set_otp_token_cookie(response: Response, value: str) -> None:
+    """Set the short-lived OTP flow token as an HTTP-only cookie.
+
+    The cookie attributes (HttpOnly, Secure, SameSite, Path, Max-Age) are all
+    configurable via the service settings. Max-Age mirrors the OTP expiry.
+    """
+    response.set_cookie(
+        settings.otp_token_cookie_name,
+        value,
+        **_options(settings.otp_expire_minutes * 60),
+    )
+
+
+def clear_otp_token_cookie(response: Response) -> None:
+    response.delete_cookie(
+        settings.otp_token_cookie_name,
+        **{k: v for k, v in _options(0).items() if k != "max_age"},
+    )
+
+
+def set_access_token_cookie(response: Response, value: str) -> None:
+    """Set the HttpOnly access token cookie. Token is never sent in the body."""
     response.set_cookie(
         settings.access_cookie_name,
-        access_token,
+        value,
         **_options(settings.access_token_expire_minutes * 60),
     )
+
+
+def set_refresh_token_cookie(response: Response, value: str) -> None:
+    """Set the HttpOnly refresh token cookie. Token is never sent in the body."""
     response.set_cookie(
         settings.refresh_cookie_name,
-        refresh_token,
-        **_options(settings.refresh_token_expire_days * 86400),
+        value,
+        **_options(settings.refresh_token_expire_days * 24 * 60 * 60),
     )
 
 
 def clear_auth_cookies(response: Response) -> None:
-    response.delete_cookie(
-        settings.access_cookie_name,
-        domain=settings.cookie_domain or None,
-        path=settings.cookie_path,
+    for name in (settings.access_cookie_name, settings.refresh_cookie_name):
+        response.delete_cookie(name, **{k: v for k, v in _options(0).items() if k != "max_age"})
+
+
+def set_reset_otp_token_cookie(response: Response, value: str) -> None:
+    """Set the HttpOnly cookie carrying the password-reset OTP flow token."""
+    response.set_cookie(
+        settings.reset_otp_token_cookie_name,
+        value,
+        **_options(settings.otp_expire_minutes * 60),
     )
+
+
+def clear_reset_otp_token_cookie(response: Response) -> None:
     response.delete_cookie(
-        settings.refresh_cookie_name,
-        domain=settings.cookie_domain or None,
-        path=settings.cookie_path,
+        settings.reset_otp_token_cookie_name,
+        **{k: v for k, v in _options(0).items() if k != "max_age"},
     )
 
 
-def set_flow_cookie(response: Response, name: str, value: str) -> None:
-    response.set_cookie(name, value, **_options(settings.otp_expire_minutes * 60))
+def set_reset_flow_token_cookie(response: Response, value: str) -> None:
+    """Set the short-lived HttpOnly cookie for the verified password-reset flow."""
+    response.set_cookie(
+        settings.reset_flow_token_cookie_name,
+        value,
+        **_options(settings.reset_verified_expire_minutes * 60),
+    )
 
 
-def clear_flow_cookie(response: Response, name: str) -> None:
-    response.delete_cookie(name, domain=settings.cookie_domain or None, path=settings.cookie_path)
+def clear_reset_flow_token_cookie(response: Response) -> None:
+    response.delete_cookie(
+        settings.reset_flow_token_cookie_name,
+        **{k: v for k, v in _options(0).items() if k != "max_age"},
+    )

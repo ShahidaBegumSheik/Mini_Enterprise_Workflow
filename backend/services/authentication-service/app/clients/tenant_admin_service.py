@@ -2,12 +2,38 @@ from typing import Any
 
 import httpx
 
-from app.clients.contracts import ServiceCallError, TenantAdminServiceContract
+from app.clients.contracts import (
+    ServiceCallError,
+    ServiceResponseError,
+    TenantAdminServiceContract,
+)
 from app.core.config import settings
+
+TENANT_ADMIN_SERVICE = "tenant-admin-service"
+
+
+def _extract_organization_id(body: dict[str, Any]) -> int:
+    org_id = (
+        body.get("organization_id")
+        if body.get("organization_id") is not None
+        else body.get("tenant_id")
+        if body.get("tenant_id") is not None
+        else body.get("id")
+    )
+    try:
+        return int(org_id)
+    except (TypeError, ValueError) as exc:
+        raise ServiceResponseError(
+            TENANT_ADMIN_SERVICE, "missing organization_id in response"
+        ) from exc
 
 
 class TenantAdminServiceClient(TenantAdminServiceContract):
-    """HTTPX-based implementation of the Tenant Admin Service contract."""
+    """HTTPX-based implementation of the Tenant Admin Service contract.
+
+    Communication uses the shared ``httpx.AsyncClient``; base URL and the
+    internal API key come from configuration, never hardcoded values.
+    """
 
     def __init__(
         self,
@@ -28,13 +54,22 @@ class TenantAdminServiceClient(TenantAdminServiceContract):
     def _raise_for(self, response: httpx.Response) -> None:
         if response.status_code >= 400:
             raise ServiceCallError(
-                service="tenant-admin-service",
+                service=TENANT_ADMIN_SERVICE,
                 status_code=response.status_code,
                 detail=response.text,
             )
 
+    def _parse_body(self, response: httpx.Response) -> dict[str, Any]:
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ServiceResponseError(TENANT_ADMIN_SERVICE, "non-JSON body") from exc
+        if not isinstance(body, dict):
+            raise ServiceResponseError(TENANT_ADMIN_SERVICE, "body is not an object")
+        return body
+
     async def create_organization(
-        self, payload: dict[str, Any], *, access_token: str
+        self, payload: dict[str, Any], *, access_token: str = ""
     ) -> dict[str, Any]:
         response = await self.http.post(
             f"{self.base_url}/api/v1/internal/organizations",
@@ -42,7 +77,9 @@ class TenantAdminServiceClient(TenantAdminServiceContract):
             json=payload,
         )
         self._raise_for(response)
-        return response.json()
+        body = self._parse_body(response)
+        _extract_organization_id(body)
+        return body
 
     async def update_organization_profile(
         self, payload: dict[str, Any], *, access_token: str
@@ -53,7 +90,7 @@ class TenantAdminServiceClient(TenantAdminServiceContract):
             json=payload,
         )
         self._raise_for(response)
-        return response.json()
+        return self._parse_body(response)
 
     async def update_organization_settings(
         self, payload: dict[str, Any], *, access_token: str
@@ -64,7 +101,7 @@ class TenantAdminServiceClient(TenantAdminServiceContract):
             json=payload,
         )
         self._raise_for(response)
-        return response.json()
+        return self._parse_body(response)
 
     async def get_organization_dashboard(
         self, *, access_token: str
@@ -74,7 +111,7 @@ class TenantAdminServiceClient(TenantAdminServiceContract):
             headers=self._headers(access_token),
         )
         self._raise_for(response)
-        return response.json()
+        return self._parse_body(response)
 
     async def sync_user(
         self, user_id: int, action: str, payload: dict[str, Any]

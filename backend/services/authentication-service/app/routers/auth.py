@@ -1,358 +1,493 @@
-import secrets
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response, Security
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.orm import Session
-
-from app.clients.tenant_admin_service import TenantAdminServiceClient
-from app.clients.user_service import UserServiceClient
-from app.core.config import settings
 from app.core.cookies import (
     clear_auth_cookies,
-    clear_flow_cookie,
-    set_auth_cookies,
-    set_flow_cookie,
+    clear_otp_token_cookie,
+    clear_reset_flow_token_cookie,
+    clear_reset_otp_token_cookie,
+    set_access_token_cookie,
+    set_otp_token_cookie,
+    set_refresh_token_cookie,
+    set_reset_flow_token_cookie,
+    set_reset_otp_token_cookie,
 )
-from app.database.session import get_db
-from app.dependencies.auth import get_current_user
-from app.repositories.auth_repository import AuthRepository
-from app.schemas.auth import (
-    AuthUserInfo,
+from app.core.config import settings
+from app.routers.dependencies import get_current_user, get_service
+from app.schemas import (
+    ErrorResponse,
     ForgotPasswordRequest,
     LoginRequest,
     LoginResponse,
+    MeResponse,
+    MessageResponse,
     OTPVerifyRequest,
+    RefreshResponse,
     RegisterRequest,
     RegistrationVerifiedResponse,
     ResetPasswordRequest,
-    TokenContextResponse,
 )
-from app.schemas.common import MessageResponse
-from app.services.auth import AuthService
+from app.services import (
+    AuthService,
+    InvalidOTPError,
+    OTPAttemptsExhaustedError,
+    OTPResendLimitExceededError,
+)
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
-bearer = HTTPBearer(auto_error=False, scheme_name="BearerAuth")
+
+MISSING_OTP_TOKEN = "OTP flow token is missing or expired. Please register again."
+MISSING_RESET_OTP_TOKEN = (
+    "Password reset OTP token is missing or expired. Please request a new one."
+)
+MISSING_RESET_FLOW_TOKEN = (
+    "Password reset token is missing or expired. Please request a new one."
+)
+FORGOT_PASSWORD_GENERIC_MESSAGE = "If the account exists, an OTP has been sent."
 
 
-def service(request: Request, db: Session = Depends(get_db)) -> AuthService:
-    return AuthService(
-        AuthRepository(db),
-        UserServiceClient(request.app.state.http),
-        TenantAdminServiceClient(request.app.state.http),
+def _error_responses(error_map: dict[int, str]) -> dict:
+    """Build OpenAPI ``responses`` entries for the service's business errors.
+
+    All business errors share the ``{"detail": str}`` shape; FastAPI still
+    auto-documents its own 422 `HTTPValidationError` for request bodies.
+    """
+    return {
+        status_code: {"model": ErrorResponse, "description": description}
+        for status_code, description in error_map.items()
+    }
+
+
+_COOKIE_AUTH_NOTE = (
+    "Tokens never leave the browser: they are set and read exclusively as "
+    "HttpOnly cookies by the service. Nothing sensitive is returned in bodies."
+)
+
+
+def _cookie_name() -> str:
+    return settings.otp_token_cookie_name
+
+
+def _otp_cookie(request: Request) -> str | None:
+    return request.cookies.get(_cookie_name())
+
+
+def _error_response(status_code: int, detail: str, headers: dict | None = None):
+    """Error response so we can still manipulate the OTP cookie on it.
+
+    Raising an HTTPException would make FastAPI build a fresh error response
+    and would discard any cookies already set on this response object.
+    """
+    return JSONResponse(
+        content={"detail": detail},
+        status_code=status_code,
+        headers=headers,
     )
 
 
-def require_internal_key(
-    x_internal_api_key: str = Header(..., alias="X-Internal-API-Key"),
-) -> None:
-    if not secrets.compare_digest(x_internal_api_key, settings.internal_api_key):
-        raise HTTPException(status_code=401, detail="Invalid internal API key")
-
-
-# ---------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------
-
-
-@router.post("/register", response_model=MessageResponse)
+@router.post(
+    "/register",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Register an account (email OTP)",
+    description=(
+        "Validates the registration (individual or organization), generates a numeric OTP "
+        "and stores the encrypted, short-lived OTP flow inside the `otp_token` HttpOnly "
+        "cookie. The OTP email is delivered through the Notification Service. "
+        "Nothing about the account is persisted until the OTP is verified. "
+        + _COOKIE_AUTH_NOTE
+    ),
+    responses=_error_responses(
+        {
+            409: "An account with this email already exists",
+            502: "Notification Service rejected the OTP request",
+            503: "Notification Service is unreachable",
+        }
+    ),
+)
 async def register(
     data: RegisterRequest,
     response: Response,
-    svc: AuthService = Depends(service),
+    service: AuthService = Depends(get_service),
 ):
-    result = await svc.register(data)
-    set_flow_cookie(response, settings.registration_otp_cookie_name, result["flow_id"])
+    result = await service.register(data)
+    set_otp_token_cookie(response, result["token"])
     return MessageResponse(
-        message="OTP sent successfully. Verify it within five minutes.",
+        message="OTP sent successfully. Please verify within "
+        f"{settings.otp_expire_minutes} minutes.",
         expires_in=result["expires_in"],
     )
 
 
-@router.post("/verify-otp", response_model=RegistrationVerifiedResponse)
-async def verify_registration(
+@router.post(
+    "/verify-otp",
+    response_model=RegistrationVerifiedResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Verify the registration OTP",
+    description=(
+        "Verifies the OTP from the `otp_token` cookie. On success the user (and, for "
+        "organization accounts, the organization) is created through the User Service "
+        "and Tenant Admin Service contracts, the credential is stored, and the flow "
+        "cookie is cleared. Wrong OTPs consume attempts (see `x-remaining-attempts`). "
+        + _COOKIE_AUTH_NOTE
+    ),
+    responses=_error_responses(
+        {
+            400: "Missing or invalid OTP / expired flow token",
+            409: "Email is already registered",
+            429: "Too many incorrect OTP attempts",
+            502: "User/Tenant Admin Service dependency failed",
+            503: "A required service dependency is unreachable",
+        }
+    ),
+)
+async def verify_otp(
     data: OTPVerifyRequest,
     response: Response,
     request: Request,
-    registration_token: str | None = Cookie(
-        default=None, alias=settings.registration_otp_cookie_name
-    ),
-    svc: AuthService = Depends(service),
+    otp_cookie: str | None = Cookie(None, alias=_cookie_name()),
+    service: AuthService = Depends(get_service),
 ):
-    if not registration_token:
-        raise HTTPException(status_code=401, detail="Registration OTP cookie is missing")
-    result = await svc.verify_registration(
-        registration_token,
-        data.otp,
-        client_ip=request.client.host if request.client else None,
+    token = otp_cookie or _otp_cookie(request)
+    if not token:
+        error = _error_response(status.HTTP_400_BAD_REQUEST, MISSING_OTP_TOKEN)
+        clear_otp_token_cookie(error)
+        return error
+
+    try:
+        result = await service.verify_otp(token, data.otp)
+    except InvalidOTPError as exc:
+        error = _error_response(
+            status.HTTP_400_BAD_REQUEST,
+            "Invalid OTP",
+            headers={"x-remaining-attempts": str(exc.remaining_attempts)},
+        )
+        set_otp_token_cookie(error, exc.new_token)
+        return error
+    except OTPAttemptsExhaustedError as exc:
+        error = _error_response(status.HTTP_429_TOO_MANY_REQUESTS, exc.detail)
+        clear_otp_token_cookie(error)
+        return error
+    except HTTPException as exc:
+        error = _error_response(exc.status_code, exc.detail, dict(exc.headers or {}))
+        clear_otp_token_cookie(error)
+        return error
+
+    clear_otp_token_cookie(response)
+    return RegistrationVerifiedResponse(**result)
+
+
+@router.post(
+    "/resend-otp",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Resend the registration OTP",
+    description=(
+        "Rotates the OTP inside the `otp_token` cookie and re-delivers it via the "
+        "Notification Service. Resends are bounded by `OTP_MAX_RESENDS`. "
+        + _COOKIE_AUTH_NOTE
+    ),
+    responses=_error_responses(
+        {
+            400: "Missing or expired OTP flow token cookie",
+            429: "OTP resend limit exceeded",
+        }
+    ),
+)
+async def resend_otp(
+    response: Response,
+    request: Request,
+    otp_cookie: str | None = Cookie(None, alias=_cookie_name()),
+    service: AuthService = Depends(get_service),
+):
+    token = otp_cookie or _otp_cookie(request)
+    if not token:
+        error = _error_response(status.HTTP_400_BAD_REQUEST, MISSING_OTP_TOKEN)
+        clear_otp_token_cookie(error)
+        return error
+
+    try:
+        result = await service.resend_otp(token)
+    except OTPResendLimitExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=exc.detail) from exc
+    except HTTPException as exc:
+        raise exc from exc
+
+    set_otp_token_cookie(response, result["token"])
+    return MessageResponse(
+        message="OTP re-sent successfully.",
+        resend_count=result["resend_count"],
+        expires_in=result["expires_in"],
     )
-    if not result["verified"]:
-        error = (
-            "Maximum OTP verification attempts exceeded"
-            if result["remaining_attempts"] <= 0
-            else "Invalid OTP"
-        )
-        raise HTTPException(
-            status_code=400,
-            detail=error,
-            headers={"x-remaining-attempts": str(result["remaining_attempts"])},
-        )
-    clear_flow_cookie(response, settings.registration_otp_cookie_name)
-    return RegistrationVerifiedResponse(
-        message=result["message"],
+
+
+@router.post(
+    "/login",
+    response_model=LoginResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Log in and start a session",
+    description=(
+        "Validates credentials and starts a refresh-token session. The access and refresh "
+        "JWTs are delivered only as HttpOnly cookies; the response carries safe session "
+        "metadata (`session_id`, expiries) and never the tokens. "
+        + _COOKIE_AUTH_NOTE
+    ),
+    responses=_error_responses(
+        {
+            401: "Incorrect email or password",
+            403: "Account is inactive or not verified",
+        }
+    ),
+)
+async def login(
+    data: LoginRequest,
+    response: Response,
+    request: Request,
+    service: AuthService = Depends(get_service),
+):
+    result = await service.login(
+        str(data.email).lower(),
+        data.password,
+        device_info=request.headers.get("user-agent"),
+        ip_address=request.client.host if request.client else None,
+    )
+    # Tokens are delivered strictly via HttpOnly cookies, never in the body.
+    set_access_token_cookie(response, result["access_token"])
+    set_refresh_token_cookie(response, result["refresh_token"])
+    return LoginResponse(
+        message="Login successful",
         user_id=result["user_id"],
         email=result["email"],
         account_type=result["account_type"],
-        organization=result.get("organization"),
+        session_id=result["session_id"],
+        access_token_expires_in=result["access_token_expires_in"],
+        refresh_token_expires_in=result["refresh_token_expires_in"],
     )
 
 
-@router.post("/resend-otp", response_model=MessageResponse)
-async def resend_registration(
-    response: Response,
-    registration_token: str | None = Cookie(
-        default=None, alias=settings.registration_otp_cookie_name
+@router.get(
+    "/me",
+    response_model=MeResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Current authenticated principal",
+    description=(
+        "Returns the current user. Authenticates using only the HttpOnly `access_token` "
+        "cookie set by POST /login; the profile is resolved through the User Service "
+        "contract (`GET /api/v1/internal/users/{id}`), never from another database. "
+        + _COOKIE_AUTH_NOTE
     ),
-    svc: AuthService = Depends(service),
-):
-    if not registration_token:
-        raise HTTPException(status_code=401, detail="Registration OTP cookie is missing")
-    result = await svc.resend_registration_otp(registration_token)
-    set_flow_cookie(response, settings.registration_otp_cookie_name, result["flow_id"])
-    return MessageResponse(
-        message="OTP resent successfully",
-        resend_count=result["resend_count"],
-        expires_in=result["expires_in"],
-    )
+    responses=_error_responses(
+        {
+            401: "Missing, invalid, expired or revoked access token",
+        }
+    ),
+)
+async def me(current_user: dict = Depends(get_current_user)):
+    return {
+        "user_id": current_user["user_id"],
+        "email": current_user.get("email"),
+        "account_type": current_user.get("account_type"),
+    }
 
 
-# ---------------------------------------------------------------------------
-# Login / refresh / logout
-# ---------------------------------------------------------------------------
-
-
-@router.post("/login", response_model=LoginResponse)
-async def login(
-    data: LoginRequest,
+@router.post(
+    "/refresh-token",
+    response_model=RefreshResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Rotate the refresh token",
+    description=(
+        "Rotates the refresh session using the HttpOnly `refresh_token` cookie. The old "
+        "refresh token is revoked and recorded as replaced by the new session; the fresh "
+        "access and refresh JWTs are set as HttpOnly cookies. Reusing an already-rotated "
+        "token revokes the whole token family. "
+        + _COOKIE_AUTH_NOTE
+    ),
+    responses=_error_responses(
+        {
+            401: "Missing, invalid, expired or revoked refresh token",
+        }
+    ),
+)
+async def refresh_token(
+    response: Response,
     request: Request,
-    response: Response,
-    svc: AuthService = Depends(service),
+    refresh_cookie: str | None = Cookie(None, alias=settings.refresh_cookie_name),
+    service: AuthService = Depends(get_service),
 ):
-    result = await svc.login(
-        str(data.email),
-        data.password,
+    token = refresh_cookie or request.cookies.get(settings.refresh_cookie_name)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token is missing",
+        )
+
+    result = await service.refresh(
+        token,
+        device_info=request.headers.get("user-agent"),
         ip_address=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
     )
-    set_auth_cookies(response, result["access_token"], result["refresh_token"])
-    return LoginResponse(
-        message="Login successful",
-        user=AuthUserInfo.model_validate(result["user"]),
+    # Rotated tokens are delivered strictly via HttpOnly cookies, never in the body.
+    set_access_token_cookie(response, result["access_token"])
+    set_refresh_token_cookie(response, result["refresh_token"])
+    return RefreshResponse(
+        message="Tokens refreshed successfully",
+        user_id=result["user_id"],
+        session_id=result["session_id"],
+        access_token_expires_in=result["access_token_expires_in"],
+        refresh_token_expires_in=result["refresh_token_expires_in"],
     )
 
 
-@router.post("/refresh-token", response_model=MessageResponse)
-@router.post("/refresh", response_model=MessageResponse, include_in_schema=False)
-def refresh_token(
+@router.post(
+    "/logout",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Log out and revoke the session",
+    description=(
+        "Revokes the current refresh session (if the `refresh_token` cookie is present) "
+        "and clears every authentication/flow cookie using their original attributes. "
+        "Idempotent: logging out without cookies is safe. "
+        + _COOKIE_AUTH_NOTE
+    ),
+)
+async def logout(
     response: Response,
     request: Request,
-    refresh_token_value: str | None = Cookie(
-        default=None, alias=settings.refresh_cookie_name
-    ),
-    svc: AuthService = Depends(service),
+    refresh_cookie: str | None = Cookie(None, alias=settings.refresh_cookie_name),
+    service: AuthService = Depends(get_service),
 ):
-    if not refresh_token_value:
-        raise HTTPException(status_code=401, detail="Refresh-token cookie is missing")
-    result = svc.refresh(
-        refresh_token_value,
-        ip_address=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-    )
-    set_auth_cookies(response, result["access_token"], result["refresh_token"])
-    return MessageResponse(message="Session refreshed successfully")
-
-
-@router.post("/logout", response_model=MessageResponse)
-def logout(
-    response: Response,
-    refresh_token_value: str | None = Cookie(
-        default=None, alias=settings.refresh_cookie_name
-    ),
-    svc: AuthService = Depends(service),
-):
-    svc.logout(refresh_token_value)
+    token = refresh_cookie or request.cookies.get(settings.refresh_cookie_name)
+    await service.logout(token)
+    # Cookie deletion uses the same path/domain/max-age attributes as creation.
     clear_auth_cookies(response)
+    clear_otp_token_cookie(response)
     return MessageResponse(message="Logged out successfully")
 
 
-# ---------------------------------------------------------------------------
-# Forgot password / reset
-# ---------------------------------------------------------------------------
-
-
-@router.post("/forgot-password", response_model=MessageResponse)
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Request a password-reset OTP",
+    description=(
+        "Starts the password-reset flow and returns a fixed, generic message to avoid "
+        "account enumeration. If the account exists, the reset OTP token is set in the "
+        "`reset_otp_token` HttpOnly cookie and emailed, otherwise the cookie is cleared. "
+        "Resend is bounded by `OTP_MAX_RESENDS`. "
+        + _COOKIE_AUTH_NOTE
+    ),
+)
 async def forgot_password(
     data: ForgotPasswordRequest,
     response: Response,
-    svc: AuthService = Depends(service),
+    request: Request,
+    reset_cookie: str | None = Cookie(None, alias=settings.reset_otp_token_cookie_name),
+    service: AuthService = Depends(get_service),
 ):
-    result = await svc.forgot_password(str(data.email))
-    if result:
-        set_flow_cookie(response, settings.password_reset_otp_cookie_name, result["flow_id"])
-    return MessageResponse(message="If the account exists, an OTP has been sent.")
+    existing = reset_cookie or request.cookies.get(settings.reset_otp_token_cookie_name)
+    token = await service.forgot_password(str(data.email), existing_token=existing)
+    if token:
+        set_reset_otp_token_cookie(response, token)
+    else:
+        clear_reset_otp_token_cookie(response)
+    # Generic response regardless of whether the account exists (no enumeration).
+    return MessageResponse(message=FORGOT_PASSWORD_GENERIC_MESSAGE)
 
 
-@router.post("/verify-forgot-otp", response_model=MessageResponse)
-@router.post("/verify-reset-otp", response_model=MessageResponse, include_in_schema=False)
-def verify_forgot_otp(
+@router.post(
+    "/verify-forgot-otp",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Verify the password-reset OTP",
+    description=(
+        "Verifies the OTP from the `reset_otp_token` cookie. On success a short-lived "
+        "`reset_flow_token` (single-use) is issued so the caller may proceed to "
+        "reset-password. Wrong OTPs consume attempts (see `x-remaining-attempts`). "
+        + _COOKIE_AUTH_NOTE
+    ),
+    responses=_error_responses(
+        {
+            400: "Missing or invalid OTP / expired reset token",
+            429: "Too many incorrect OTP attempts",
+        }
+    ),
+)
+async def verify_forgot_otp(
     data: OTPVerifyRequest,
     response: Response,
-    reset_token: str | None = Cookie(
-        default=None, alias=settings.password_reset_otp_cookie_name
-    ),
-    svc: AuthService = Depends(service),
+    request: Request,
+    reset_cookie: str | None = Cookie(None, alias=settings.reset_otp_token_cookie_name),
+    service: AuthService = Depends(get_service),
 ):
-    if not reset_token:
-        raise HTTPException(status_code=401, detail="Password-reset OTP cookie is missing")
-    result = svc.verify_reset_otp(reset_token, data.otp)
-    if not result["verified"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid OTP",
-            headers={"x-remaining-attempts": str(result["remaining_attempts"])},
+    token = reset_cookie or request.cookies.get(settings.reset_otp_token_cookie_name)
+    if not token:
+        error = _error_response(status.HTTP_400_BAD_REQUEST, MISSING_RESET_OTP_TOKEN)
+        clear_reset_otp_token_cookie(error)
+        return error
+
+    try:
+        result = await service.verify_forgot_otp(token, data.otp)
+    except InvalidOTPError as exc:
+        error = _error_response(
+            status.HTTP_400_BAD_REQUEST,
+            "Invalid OTP",
+            headers={"x-remaining-attempts": str(exc.remaining_attempts)},
         )
-    clear_flow_cookie(response, settings.password_reset_otp_cookie_name)
-    set_flow_cookie(
-        response, settings.password_reset_verified_cookie_name, result["verified_token"]
-    )
-    return MessageResponse(
-        message="Password-reset OTP verified successfully",
-        expires_in=result["expires_in"],
-    )
+        set_reset_otp_token_cookie(error, exc.new_token)
+        return error
+    except OTPAttemptsExhaustedError as exc:
+        error = _error_response(status.HTTP_429_TOO_MANY_REQUESTS, exc.detail)
+        clear_reset_otp_token_cookie(error)
+        return error
+    except HTTPException as exc:
+        error = _error_response(exc.status_code, exc.detail, dict(exc.headers or {}))
+        clear_reset_otp_token_cookie(error)
+        return error
+
+    clear_reset_otp_token_cookie(response)
+    set_reset_flow_token_cookie(response, result["token"])
+    return MessageResponse(message="OTP verified successfully.")
 
 
-@router.post("/resend-forgot-otp", response_model=MessageResponse)
-async def resend_forgot_otp(
-    response: Response,
-    reset_token: str | None = Cookie(
-        default=None, alias=settings.password_reset_otp_cookie_name
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Reset the password",
+    description=(
+        "Applies a new password using the single-use `reset_flow_token` cookie issued by "
+        "verify-forgot-otp. On success the password hash is rotated, the credential's "
+        "`token_version` is bumped (invalidating every previously issued JWT) and all "
+        "refresh sessions are revoked. All flow/auth cookies are cleared. "
+        + _COOKIE_AUTH_NOTE
     ),
-    svc: AuthService = Depends(service),
-):
-    if not reset_token:
-        raise HTTPException(status_code=401, detail="Password-reset OTP cookie is missing")
-    result = await svc.resend_password_reset_otp(reset_token)
-    set_flow_cookie(response, settings.password_reset_otp_cookie_name, result["flow_id"])
-    return MessageResponse(
-        message="Password-reset OTP resent successfully",
-        resend_count=result["resend_count"],
-        expires_in=result["expires_in"],
-    )
-
-
-@router.post("/reset-password", response_model=MessageResponse)
-def reset_password(
+    responses=_error_responses(
+        {
+            400: "Missing, invalid, expired or already-consumed reset token",
+        }
+    ),
+)
+async def reset_password(
     data: ResetPasswordRequest,
     response: Response,
-    verified_token: str | None = Cookie(
-        default=None, alias=settings.password_reset_verified_cookie_name
-    ),
-    svc: AuthService = Depends(service),
+    request: Request,
+    flow_cookie: str | None = Cookie(None, alias=settings.reset_flow_token_cookie_name),
+    service: AuthService = Depends(get_service),
 ):
-    if not verified_token:
-        raise HTTPException(
-            status_code=401, detail="Verified password-reset cookie is missing"
-        )
-    svc.reset_password(verified_token, data.new_password)
-    clear_flow_cookie(response, settings.password_reset_verified_cookie_name)
+    token = flow_cookie or request.cookies.get(settings.reset_flow_token_cookie_name)
+    if not token:
+        error = _error_response(status.HTTP_400_BAD_REQUEST, MISSING_RESET_FLOW_TOKEN)
+        clear_reset_flow_token_cookie(error)
+        return error
+
+    try:
+        result = await service.reset_password(token, data.new_password)
+    except HTTPException as exc:
+        error = _error_response(exc.status_code, exc.detail, dict(exc.headers or {}))
+        clear_reset_flow_token_cookie(error)
+        return error
+
+    clear_reset_flow_token_cookie(response)
+    clear_reset_otp_token_cookie(response)
     clear_auth_cookies(response)
-    return MessageResponse(message="Password updated successfully")
-
-
-# ---------------------------------------------------------------------------
-# Authenticated session context
-# ---------------------------------------------------------------------------
-
-
-@router.get("/me", response_model=TokenContextResponse)
-def me(credential=Depends(get_current_user)):
-    return TokenContextResponse(
-        user_id=credential.user_id,
-        email=credential.email,
-        account_type=credential.account_type,
-        organization_id=credential.organization_id,
-        token_version=credential.token_version,
-        is_active=credential.is_active,
-        is_verified=credential.is_verified,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Internal endpoints used by other microservices
-# ---------------------------------------------------------------------------
-
-
-@router.post(
-    "/internal/validate-token",
-    dependencies=[Depends(require_internal_key)],
-    include_in_schema=False,
-)
-@router.post(
-    "/internal/token/context",
-    dependencies=[Depends(require_internal_key)],
-    include_in_schema=False,
-)
-def token_context(
-    credentials: HTTPAuthorizationCredentials | None = Security(bearer),
-    svc: AuthService = Depends(service),
-):
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(
-            status_code=401,
-            detail="Bearer access token is required",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    credential = svc.validate_access(credentials.credentials)
-    return _credential_dict(credential)
-
-
-@router.get(
-    "/internal/credentials/by-email",
-    dependencies=[Depends(require_internal_key)],
-    include_in_schema=False,
-)
-def internal_credential_by_email(
-    email: str, db: Session = Depends(get_db)
-):
-    credential = AuthRepository(db).credential_by_email(email)
-    if not credential:
-        raise HTTPException(status_code=404, detail="Credentials not found")
-    return _credential_dict(credential)
-
-
-@router.get(
-    "/internal/credentials/by-user-id",
-    dependencies=[Depends(require_internal_key)],
-    include_in_schema=False,
-)
-def internal_credential_by_user_id(
-    user_id: int, db: Session = Depends(get_db)
-):
-    credential = AuthRepository(db).credential_by_user_id(user_id)
-    if not credential:
-        raise HTTPException(status_code=404, detail="Credentials not found")
-    return _credential_dict(credential)
-
-
-def _credential_dict(credential) -> dict:
-    return {
-        "user_id": credential.user_id,
-        "email": credential.email,
-        "account_type": credential.account_type,
-        "organization_id": credential.organization_id,
-        "is_active": credential.is_active,
-        "is_verified": credential.is_verified,
-        "must_change_password": credential.must_change_password,
-        "token_version": credential.token_version,
-        "last_login_at": credential.last_login_at,
-        "created_at": credential.created_at,
-    }
+    return MessageResponse(message=result["message"])

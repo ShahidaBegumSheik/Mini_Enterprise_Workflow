@@ -11,6 +11,15 @@ class ServiceCallError(Exception):
         super().__init__(f"{service} returned {status_code}: {detail}")
 
 
+class ServiceResponseError(Exception):
+    """Raised when a downstream microservice returns a malformed/invalid body."""
+
+    def __init__(self, service: str, detail: str = "") -> None:
+        self.service = service
+        self.detail = detail
+        super().__init__(f"{service} returned an invalid response: {detail}")
+
+
 # ---------------------------------------------------------------------------
 # User Service contract
 # ---------------------------------------------------------------------------
@@ -65,7 +74,7 @@ class TenantAdminServiceContract(Protocol):
     """
 
     async def create_organization(
-        self, payload: dict[str, Any], *, access_token: str
+        self, payload: dict[str, Any], *, access_token: str = ""
     ) -> dict[str, Any]:
         ...
 
@@ -83,4 +92,42 @@ class TenantAdminServiceContract(Protocol):
         ...
 
     async def sync_user(self, user_id: int, action: str, payload: dict[str, Any]) -> None:
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Notification Service contract
+# ---------------------------------------------------------------------------
+
+# Event constants used by the Authentication Service. They are the contract
+# with the Notification Service's templated email events; raw OTP values travel
+# inside ``template_variables`` and are never logged or persisted.
+NTF_INDIVIDUAL_REGISTRATION_OTP = "individual_registration_otp"
+NTF_ORGANIZATION_REGISTRATION_OTP = "organization_registration_otp"
+NTF_FORGOT_PASSWORD_OTP = "forgot_password_otp"
+
+
+class NotificationServiceContract(Protocol):
+    """Interface the Authentication Service relies on from the Notification Service.
+
+    The Authentication Service never implements notification business logic
+    itself; it only asks the Notification Service to render + deliver a
+    templated email for a given event. The request is strictly:
+
+    - POST  /api/v1/internal/notifications
+      {"recipient_email": str, "event_type": str, "template_variables": dict}
+
+    Never send passwords, JWT tokens or any secrets in the payload — only the
+    recipient address, the event type, and the variables the template needs
+    (e.g. the OTP and its expiry). The Authentication Service has its own DB
+    and never reads the Notification Service's data.
+    """
+
+    async def send_email_notification(
+        self,
+        *,
+        recipient_email: str,
+        event_type: str,
+        template_variables: dict[str, Any],
+    ) -> None:
         ...

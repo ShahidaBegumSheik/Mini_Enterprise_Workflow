@@ -24,9 +24,10 @@ app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
     description=(
-        "MECWF Authentication Service - registration, email OTP, login, "
-        "refresh, logout and password reset. Owns authentication credentials, "
-        "OTP flow state and refresh-session metadata only."
+        "MECWF Authentication Service - registration with email OTP. "
+        "Owns authentication credentials only; user records are created "
+        "through the User Service and organization records through the "
+        "Tenant Admin Service."
     ),
     lifespan=lifespan,
 )
