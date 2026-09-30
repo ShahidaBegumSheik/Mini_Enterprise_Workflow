@@ -1,6 +1,7 @@
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from app.clients.notification_service import NotificationServiceClient
 from app.clients.tenant_admin_service import TenantAdminServiceClient
 from app.clients.user_service import UserServiceClient
 from app.core.config import settings
@@ -17,7 +18,11 @@ def get_service(
     """Build the AuthService wired to the shared HTTPX client and DB session."""
     users = UserServiceClient(request.app.state.http)
     tenants = TenantAdminServiceClient(request.app.state.http)
-    return AuthService(AuthRepository(db), users, tenants)
+    notifications = NotificationServiceClient(
+        request.app.state.http,
+        timeout=settings.notification_timeout_seconds,
+    )
+    return AuthService(AuthRepository(db), users, tenants, notifications)
 
 
 async def get_current_user(
@@ -38,6 +43,19 @@ async def get_current_user(
         claims = validate_access_token(token)
     except TokenError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+    credential = service.repo.credential_by_user_id(int(claims["sub"]))
+    if credential is None or not credential.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="No valid session"
+        )
+    if claims.get("ver", 0) != credential.token_version:
+        # token_version is bumped on password reset: any access token issued
+        # before that change is now invalid.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session has been revoked",
+        )
 
     user = await service.users.get_user(int(claims["sub"]))
     if user is None:

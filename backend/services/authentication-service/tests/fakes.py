@@ -1,6 +1,45 @@
 import httpx
 
-from app.clients.contracts import ServiceCallError
+from app.clients.contracts import ServiceCallError, ServiceResponseError
+
+
+class FakeNotificationClient:
+    """In-memory Notification Service client for tests.
+
+    Records deliveries so tests can assert that only safe payload pieces
+    (recipient, event type, template variables) leave the Authentication
+    Service — never passwords or JWT tokens.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self.fail_mode: str | None = None
+
+    async def send_email_notification(
+        self,
+        *,
+        recipient_email: str,
+        event_type: str,
+        template_variables: dict,
+    ) -> None:
+        self.sent.append(
+            {
+                "recipient_email": recipient_email,
+                "event_type": event_type,
+                "template_variables": template_variables,
+            }
+        )
+        if self.fail_mode == "unavailable":
+            raise httpx.ConnectError("connection refused to notification-service")
+        if self.fail_mode == "timeout":
+            raise httpx.ReadTimeout("notification-service read timeout")
+        if self.fail_mode == "4xx":
+            raise ServiceCallError("notification-service", 422, "bad event")
+        if self.fail_mode == "5xx":
+            raise ServiceCallError("notification-service", 500, "smtp down")
+        if self.fail_mode == "invalid":
+            raise ServiceResponseError("notification-service", "bad body")
+        return None
 
 
 class FakeUserClient:

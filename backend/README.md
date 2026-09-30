@@ -65,10 +65,27 @@ against an empty volume. Each service applies its own Alembic migrations at boot
 
 ## Authentication Service
 
-Owns (read/write): `auth_credentials` in `auth_db`. The registration/OTP flow is
-fully stateless — the OTP and the registration payload travel encrypted
-(Fernet) inside a signed, short-lived `otp_token` HTTP-only cookie. Nothing
-except the final credential is ever persisted.
+Owns (read/write) `auth_credentials`, `refresh_sessions` and `password_resets`
+in `auth_db` (its own database, using its own Alembic chain headed by
+`alembic_version_auth`). It never creates foreign keys into, or reads from, the
+User Service or Tenant Admin Service databases — `user_id` / `organization_id`
+are stored only as plain external identifiers.
+
+Persistence is strictly auth-owned, safe metadata:
+
+- `auth_credentials` — the credentials needed to authenticate a principal. The
+  password is stored **only** as a bcrypt `password_hash`; never plaintext.
+- `refresh_sessions` — one row per issued refresh token; stores the token's
+  `jti` plus a SHA-256 `token_hash`, issuance/expiry/revocation times and the
+  `replaced_by` chain for rotation. Never stores the raw refresh token.
+- `password_resets` — single-use reset-flow metadata; only a SHA-256
+  `token_hash` and the `consumed_at` marker. Never stores the reset JWT.
+
+The registration/OTP and forgot-password OTP flows are fully stateless — the
+OTP and the flow payload travel encrypted (Fernet) inside signed, short-lived
+HTTP-only cookies (`otp_token`, `reset_otp_token`). No `otp_verifications`
+table exists and no raw OTP is ever persisted. OTP emails are delivered via the
+Notification Service (`POST /api/v1/internal/notifications`), never raw SMTP.
 
 Public API under `/api/v1/auth/*`:
 

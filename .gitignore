@@ -9,7 +9,6 @@ mecwf_venv/
 
 # Environment files (real credentials live only in local .env files)
 .env
-!.env.example
 
 # Local databases
 *.db

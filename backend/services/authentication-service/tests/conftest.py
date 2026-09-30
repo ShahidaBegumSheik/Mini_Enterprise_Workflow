@@ -31,7 +31,7 @@ from app.repositories import AuthRepository
 from app.routers.dependencies import get_service
 from app.services import AuthService
 
-from tests.fakes import FakeTenantClient, FakeUserClient
+from tests.fakes import FakeNotificationClient, FakeTenantClient, FakeUserClient
 
 ENGINE_PATH = Path(tempfile.mkdtemp()) / "test_auth.db"
 
@@ -74,14 +74,14 @@ def session_factory(engine):
 
 @pytest.fixture
 def fakes():
-    return FakeUserClient(), FakeTenantClient()
+    return FakeUserClient(), FakeTenantClient(), FakeNotificationClient()
 
 
 def _dependency(fakes, session_factory):
     def _get_service():
         db = session_factory()
         try:
-            yield AuthService(AuthRepository(db), fakes[0], fakes[1])
+            yield AuthService(AuthRepository(db), fakes[0], fakes[1], fakes[2])
         finally:
             db.close()
 
@@ -110,7 +110,9 @@ async def client(session_factory, fakes):
 
 @pytest.fixture
 async def service(fakes, session_factory):
-    service = AuthService(AuthRepository(session_factory()), fakes[0], fakes[1])
+    service = AuthService(
+        AuthRepository(session_factory()), fakes[0], fakes[1], fakes[2]
+    )
     yield service
 
 

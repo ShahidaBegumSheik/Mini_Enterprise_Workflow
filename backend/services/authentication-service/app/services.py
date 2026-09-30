@@ -9,7 +9,14 @@ from typing import Any
 import httpx
 from fastapi import HTTPException
 
-from app.clients.contracts import ServiceCallError, ServiceResponseError
+from app.clients.contracts import (
+    NTF_FORGOT_PASSWORD_OTP,
+    NTF_INDIVIDUAL_REGISTRATION_OTP,
+    NTF_ORGANIZATION_REGISTRATION_OTP,
+    NotificationServiceContract,
+    ServiceCallError,
+    ServiceResponseError,
+)
 from app.clients.tenant_admin_service import TenantAdminServiceClient
 from app.clients.user_service import UserServiceClient
 from app.core.config import settings
@@ -34,11 +41,15 @@ __all__ = [
     "InvalidOTPError",
     "OTPAttemptsExhaustedError",
     "OTPResendLimitExceededError",
+    "PASSWORD_RESET_PURPOSE",
+    "PASSWORD_RESET_VERIFIED_PURPOSE",
     "AuthService",
     "send_email",
 ]
 
 REGISTRATION_PURPOSE = "registration"
+PASSWORD_RESET_PURPOSE = "password_reset"
+PASSWORD_RESET_VERIFIED_PURPOSE = "password_reset_verified"
 
 
 class FlowError(Exception):
@@ -140,6 +151,34 @@ def _map_upstream_error(
     )
 
 
+def _map_notification_error(exc: Exception) -> HTTPException:
+    """Map notification-client failures onto caller-facing HTTP errors."""
+    if isinstance(exc, ServiceCallError):
+        if 400 <= exc.status_code < 500:
+            return HTTPException(
+                status_code=502,
+                detail="notification-service rejected the notification request",
+            )
+        return HTTPException(
+            status_code=502,
+            detail=f"notification-service failed (HTTP {exc.status_code})",
+        )
+    if isinstance(exc, ServiceResponseError):
+        return HTTPException(
+            status_code=502,
+            detail="notification-service returned an invalid response",
+        )
+    if isinstance(exc, httpx.HTTPError):
+        return HTTPException(
+            status_code=503,
+            detail="notification-service is unreachable at this time",
+        )
+    return HTTPException(
+        status_code=502,
+        detail="notification-service could not deliver the notification",
+    )
+
+
 class AuthService:
     """Authentication orchestrator for the registration flow.
 
@@ -155,10 +194,12 @@ class AuthService:
         repo: AuthRepository,
         users: UserServiceClient,
         tenants: TenantAdminServiceClient,
+        notifications: NotificationServiceContract,
     ) -> None:
         self.repo = repo
         self.users = users
         self.tenants = tenants
+        self.notifications = notifications
 
     async def register(self, data: RegisterRequest) -> dict[str, Any]:
         email = str(data.email).lower()
@@ -184,7 +225,14 @@ class AuthService:
             flow_payload,
             ttl=timedelta(minutes=settings.otp_expire_minutes),
         )
-        await self._send_otp(email, otp)
+        try:
+            await self._send_otp(email, otp, account_type=data.account_type)
+        except (
+            httpx.HTTPError,
+            ServiceCallError,
+            ServiceResponseError,
+        ) as exc:
+            raise _map_notification_error(exc) from exc
         return {"token": token, "expires_in": settings.otp_expire_minutes * 60}
 
     async def login(
@@ -344,6 +392,165 @@ class AuthService:
         self.repo.revoke_refresh_session(session_id)
         return {"revoked": True}
 
+    async def forgot_password(
+        self,
+        email: str,
+        *,
+        existing_token: str | None = None,
+    ) -> str | None:
+        """Start a password-reset OTP flow.
+
+        Returns the sealed OTP flow token (to be stored in an HttpOnly cookie)
+        only when the account exists. Callers must produce an identical generic
+        response either way so account existence is never disclosable. When an
+        existing flow token is presented (a resend attempt) the resend limit is
+        enforced before a new OTP is issued. The OTP is never persisted.
+        """
+        email = str(email).lower()
+        if self.repo.credential_by_email(email) is None:
+            return None
+
+        flow: dict[str, Any] | None = None
+        if existing_token:
+            try:
+                candidate = open_otp_flow(existing_token)
+            except ValueError:
+                candidate = None
+            if (
+                candidate
+                and candidate.get("purpose") == PASSWORD_RESET_PURPOSE
+                and str(candidate.get("email", "")).lower() == email
+            ):
+                flow = candidate
+
+        if flow is not None:
+            if flow["resends"] >= settings.otp_max_resends:
+                # Resend limit reached: keep the current OTP, do not send again.
+                return existing_token
+            otp = generate_otp()
+            flow["otp"] = otp
+            flow["attempts"] = 0
+            flow["resends"] = flow["resends"] + 1
+            token = _seal_preserving_expiry(flow)
+        else:
+            otp = generate_otp()
+            flow = {
+                "purpose": PASSWORD_RESET_PURPOSE,
+                "email": email,
+                "otp": otp,
+                "attempts": 0,
+                "resends": 0,
+            }
+            token = seal_otp_flow(
+                flow,
+                ttl=timedelta(minutes=settings.otp_expire_minutes),
+            )
+
+        try:
+            await self._send_password_otp(email, otp)
+        except (httpx.HTTPError, ServiceCallError, ServiceResponseError):
+            # Never surface a notification failure here: doing so would turn
+            # this generic endpoint into an account-existence oracle. Keep
+            # the generic response; ops can observe the issue independently.
+            pass
+        return token
+
+    async def verify_forgot_otp(
+        self,
+        token: str,
+        submitted_otp: str,
+    ) -> dict[str, Any]:
+        """Verify the password-reset OTP and issue the short-lived verified token.
+
+        On success a single-use reset record is persisted (only a hash of the
+        reset token's jti) and a signed, encrypted, short-lived verified token
+        is returned for the second cookie.
+        """
+        flow = self._open_reset_flow(token)
+
+        if flow["attempts"] >= settings.otp_max_attempts:
+            raise OTPAttemptsExhaustedError()
+
+        if not compare_otp(submitted_otp, flow["otp"]):
+            flow["attempts"] = flow["attempts"] + 1
+            remaining = max(settings.otp_max_attempts - flow["attempts"], 0)
+            raise InvalidOTPError(remaining, _seal_preserving_expiry(flow))
+
+        credential = self.repo.credential_by_email(flow["email"])
+        if credential is None:
+            raise HTTPException(
+                status_code=400, detail="Invalid or expired reset OTP token"
+            )
+
+        reset_id = secrets.token_hex(16)
+        expires_at = utcnow() + timedelta(minutes=settings.reset_verified_expire_minutes)
+        self.repo.create_password_reset(
+            reset_id=reset_id,
+            user_id=credential.user_id,
+            expires_at=expires_at,
+        )
+        verified_token = seal_otp_flow(
+            {
+                "purpose": PASSWORD_RESET_VERIFIED_PURPOSE,
+                "email": flow["email"],
+                "reset_id": reset_id,
+            },
+            exp_at=expires_at,
+        )
+        return {
+            "token": verified_token,
+            "expires_in": settings.reset_verified_expire_minutes * 60,
+        }
+
+    async def reset_password(
+        self,
+        token: str,
+        new_password: str,
+    ) -> dict[str, Any]:
+        """Apply a new password using a verified, single-use reset token.
+
+        Validates the verified token (signature, purpose, expiry, single-use),
+        then rotates the stored password hash, bumps ``token_version`` and
+        revokes every refresh session so all previously authenticated sessions
+        are invalidated immediately.
+        """
+        try:
+            flow = open_otp_flow(token)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if flow.get("purpose") != PASSWORD_RESET_VERIFIED_PURPOSE:
+            raise HTTPException(
+                status_code=400, detail="Invalid or expired reset token"
+            )
+
+        reset_id = flow.get("reset_id")
+        if not reset_id:
+            raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+        reset = self.repo.password_reset_by_id(reset_id)
+        if reset is None:
+            raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+        if reset.consumed_at is not None:
+            raise HTTPException(
+                status_code=400, detail="Reset token has already been used"
+            )
+        if reset.expires_at <= utcnow():
+            raise HTTPException(status_code=400, detail="Reset token has expired")
+
+        credential = self.repo.credential_by_user_id(reset.user_id)
+        if credential is None:
+            raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+        self.repo.consume_password_reset(reset_id)
+        self.repo.update_password_hash(reset.user_id, hash_password(new_password))
+        self.repo.revoke_all_refresh_sessions(reset.user_id)
+
+        return {
+            "message": "Password has been reset successfully.",
+            "user_id": credential.user_id,
+        }
+
     async def resend_otp(self, token: str) -> dict[str, Any]:
         flow = self._open_flow(token)
 
@@ -356,7 +563,7 @@ class AuthService:
         flow["resends"] = flow["resends"] + 1
 
         new_token = _seal_preserving_expiry(flow)
-        await self._send_otp(flow["email"], otp)
+        await self._send_otp(flow["email"], otp, account_type=flow["account_type"])
         return {
             "token": new_token,
             "resend_count": flow["resends"],
@@ -460,11 +667,48 @@ class AuthService:
             )
         return flow
 
-    async def _send_otp(self, email: str, otp: str) -> None:
-        send_email(
-            email,
-            "MECWF Registration OTP",
-            f"Your OTP is {otp}. It expires in {settings.otp_expire_minutes} minutes.",
+    def _open_reset_flow(self, token: str) -> dict[str, Any]:
+        try:
+            flow = open_otp_flow(token)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if flow.get("purpose") != PASSWORD_RESET_PURPOSE:
+            raise HTTPException(
+                status_code=400, detail="Invalid or expired reset OTP token"
+            )
+        return flow
+
+    async def _send_otp(
+        self,
+        email: str,
+        otp: str,
+        *,
+        account_type: str,
+    ) -> None:
+        """Deliver a registration OTP through the Notification Service."""
+        event_type = (
+            NTF_ORGANIZATION_REGISTRATION_OTP
+            if account_type == "organization"
+            else NTF_INDIVIDUAL_REGISTRATION_OTP
+        )
+        await self.notifications.send_email_notification(
+            recipient_email=email,
+            event_type=event_type,
+            template_variables={
+                "otp": otp,
+                "expires_in_minutes": settings.otp_expire_minutes,
+            },
+        )
+
+    async def _send_password_otp(self, email: str, otp: str) -> None:
+        """Deliver a forgot-password OTP through the Notification Service."""
+        await self.notifications.send_email_notification(
+            recipient_email=email,
+            event_type=NTF_FORGOT_PASSWORD_OTP,
+            template_variables={
+                "otp": otp,
+                "expires_in_minutes": settings.otp_expire_minutes,
+            },
         )
 
     async def _send_welcome(self, email: str, full_name: str) -> None:

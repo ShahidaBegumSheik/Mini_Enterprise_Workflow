@@ -131,6 +131,8 @@ def open_otp_flow(token: str) -> dict[str, Any]:
             expires = datetime.fromisoformat(exp_at)
         except (TypeError, ValueError) as exc:
             raise ValueError("Invalid or expired OTP flow token") from exc
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
         if expires <= datetime.now(timezone.utc):
             raise ValueError("OTP has expired")
     return payload

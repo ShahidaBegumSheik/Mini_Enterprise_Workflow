@@ -16,12 +16,16 @@ from app.core.config import settings
 
 __all__ = [
     "MessageResponse",
+    "ErrorResponse",
+    "MeResponse",
     "RegisterRequest",
     "OTPVerifyRequest",
     "RegistrationVerifiedResponse",
     "LoginRequest",
     "LoginResponse",
     "RefreshResponse",
+    "ForgotPasswordRequest",
+    "ResetPasswordRequest",
 ]
 
 PERSONAL_EMAIL_DOMAINS = {
@@ -76,6 +80,24 @@ class MessageResponse(BaseModel):
     remaining_attempts: int | None = None
     resend_count: int | None = None
     expires_in: int | None = None
+
+
+class ErrorResponse(BaseModel):
+    """Uniform error body returned by every documented error status.
+
+    FastAPI's default 422 validation errors use `HTTPValidationError`; all
+    business errors (400/401/403/409/429/502/503) share this shape.
+    """
+
+    detail: str
+
+
+class MeResponse(BaseModel):
+    """Currently authenticated principal (resolved via the access cookie)."""
+
+    user_id: int
+    email: str | None = None
+    account_type: str | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -167,3 +189,28 @@ class RefreshResponse(BaseModel):
     session_id: str
     access_token_expires_in: int
     refresh_token_expires_in: int
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        return value.strip().lower()
+
+
+class ResetPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=72)
+    confirm_password: str = Field(min_length=8, max_length=72)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        return validate_password_strength(value)
+
+    @model_validator(mode="after")
+    def passwords_match(self):
+        if self.new_password != self.confirm_password:
+            raise ValueError("Passwords do not match")
+        return self

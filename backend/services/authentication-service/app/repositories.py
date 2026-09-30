@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.utils import utcnow
-from app.models import AuthCredential, RefreshSession
+from app.models import AuthCredential, PasswordReset, RefreshSession
 
 __all__ = ["AuthRepository"]
 
@@ -135,3 +135,66 @@ class AuthRepository:
                 session.revoked_at = utcnow()
             current_id = session.replaced_by
         self.db.commit()
+
+    def revoke_all_refresh_sessions(self, user_id: int) -> None:
+        """Revoke every non-revoked refresh session for a user.
+
+        Used after a password reset so all previously issued refresh tokens
+        (and the sessions behind them) stop working immediately.
+        """
+        now = utcnow()
+        sessions = self.db.scalars(
+            select(RefreshSession).where(
+                RefreshSession.user_id == user_id,
+                RefreshSession.revoked_at.is_(None),
+            )
+        ).all()
+        for session in sessions:
+            session.revoked_at = now
+        self.db.commit()
+
+    # ------------------------------------------------------------------
+    # Password reset metadata (single-use, hash-only - never the raw JWT)
+    # ------------------------------------------------------------------
+
+    def create_password_reset(
+        self,
+        *,
+        reset_id: str,
+        user_id: int,
+        expires_at: datetime,
+    ) -> PasswordReset:
+        reset = PasswordReset(
+            id=reset_id,
+            user_id=user_id,
+            token_hash=token_hash(reset_id),
+            expires_at=expires_at,
+        )
+        self.db.add(reset)
+        self.db.commit()
+        self.db.refresh(reset)
+        return reset
+
+    def password_reset_by_id(self, reset_id: str) -> PasswordReset | None:
+        return self.db.scalar(
+            select(PasswordReset).where(PasswordReset.id == reset_id)
+        )
+
+    def consume_password_reset(self, reset_id: str) -> None:
+        """Mark a reset token consumed so it cannot be used again (single-use)."""
+        reset = self.password_reset_by_id(reset_id)
+        if reset is None:
+            return
+        reset.consumed_at = utcnow()
+        self.db.commit()
+
+    def update_password_hash(self, user_id: int, password_hash: str) -> AuthCredential | None:
+        """Replace the password hash and bump token_version to kill old JWTs."""
+        credential = self.credential_by_user_id(user_id)
+        if credential is None:
+            return None
+        credential.password_hash = password_hash
+        credential.token_version = credential.token_version + 1
+        self.db.commit()
+        self.db.refresh(credential)
+        return credential

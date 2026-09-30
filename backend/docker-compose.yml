@@ -27,12 +27,19 @@ services:
     env_file:
       - ./.env
       - ./services/authentication-service/.env
+    environment:
+      # Container-side value for the uvicorn port; overridable per-host.
+      AUTHENTICATION_SERVICE_PORT: ${AUTHENTICATION_SERVICE_PORT:-8001}
     ports:
-      - "8001:8001"
+      - "${AUTHENTICATION_SERVICE_PORT:-8001}:${AUTHENTICATION_SERVICE_PORT:-8001}"
     depends_on:
       db:
         condition: service_healthy
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8001"
+    # Alembic runs before uvicorn on the DB that Compose has already gated as
+    # healthy (single service instance => idempotent `upgrade head` is safe).
+    # $$ escapes Compose interpolation so the port expands inside the
+    # container from its own AUTHENTICATION_SERVICE_PORT value.
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $$AUTHENTICATION_SERVICE_PORT"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 5s
