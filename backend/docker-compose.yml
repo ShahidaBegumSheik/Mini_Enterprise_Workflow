@@ -10,12 +10,16 @@ services:
       TENANT_ADMIN_DB_USER: ${TENANT_ADMIN_DB_USER}
       TENANT_ADMIN_DB_PASSWORD: ${TENANT_ADMIN_DB_PASSWORD}
     ports:
-      - "3307:3306"
+      - "3311:3306"
     volumes:
       - ecwf_db_data:/var/lib/mysql
       - ./db-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p${MYSQL_ROOT_PASSWORD} --silent"]
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -uroot -p${MYSQL_ROOT_PASSWORD} --silent",
+        ]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -28,71 +32,92 @@ services:
       - ./.env
       - ./services/authentication-service/.env
     environment:
-      # Container-side value for the uvicorn port; overridable per-host.
       AUTHENTICATION_SERVICE_PORT: ${AUTHENTICATION_SERVICE_PORT:-8001}
     ports:
       - "${AUTHENTICATION_SERVICE_PORT:-8001}:${AUTHENTICATION_SERVICE_PORT:-8001}"
     depends_on:
       db:
         condition: service_healthy
-    # Alembic runs before uvicorn on the DB that Compose has already gated as
-    # healthy (single service instance => idempotent `upgrade head` is safe).
-    # $$ escapes Compose interpolation so the port expands inside the
-    # container from its own AUTHENTICATION_SERVICE_PORT value.
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $$AUTHENTICATION_SERVICE_PORT"
+    command: >
+      sh -c "alembic upgrade head &&
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port $$AUTHENTICATION_SERVICE_PORT"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8011/health')",
+        ]
       interval: 5s
       timeout: 3s
       retries: 20
       start_period: 10s
     restart: on-failure
 
-  # Owned by the User Service teammate. Uncomment when the service is implemented.
-  # user-service:
-  #   build: ./services/user-service
-  #   env_file:
-  #     - ./.env
-  #     - ./services/user-service/.env
-  #   ports:
-  #     - "8002:8002"
-  #   depends_on:
-  #     db:
-  #       condition: service_healthy
-  #     authentication-service:
-  #       condition: service_healthy
-  #   command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8002"
-  #   healthcheck:
-  #     test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
-  #     interval: 5s
-  #     timeout: 3s
-  #     retries: 20
-  #     start_period: 10s
-  #   restart: on-failure
+  user-service:
+    build: ./services/User_service
+    env_file:
+      - ./.env
+      - ./services/User_service/.env
+    ports:
+      - "8002:8002"
+    depends_on:
+      db:
+        condition: service_healthy
+      authentication-service:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8002"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: on-failure
 
-  # Owned by the Tenant Admin Service teammate. Uncomment when the service is implemented.
-  # tenant-admin-service:
-  #   build: ./services/tenant-admin-service
-  #   env_file:
-  #     - ./.env
-  #     - ./services/tenant-admin-service/.env
-  #   ports:
-  #     - "8003:8003"
-  #   depends_on:
-  #     db:
-  #       condition: service_healthy
-  #     authentication-service:
-  #       condition: service_healthy
-  #     # user-service:
-  #     #   condition: service_healthy
-  #   command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8003"
-  #   healthcheck:
-  #     test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
-  #     interval: 5s
-  #     timeout: 3s
-  #     retries: 20
-  #     start_period: 10s
-  #   restart: on-failure
+  tenant-admin-service:
+    build: ./services/tenant-admin-service
+    env_file:
+      - ./.env
+      - ./services/tenant-admin-service/.env
+    ports:
+      - "8003:8003"
+    depends_on:
+      db:
+        condition: service_healthy
+      authentication-service:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8003"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: on-failure
 
   api-gateway:
     image: nginx:1.27-alpine
