@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 import hashlib
 import hmac
 import json
@@ -195,18 +195,31 @@ def _encode(claims: dict[str, Any]) -> str:
     return jwt.encode(claims, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
+
+
 def create_access_token(
     user_id: int,
     *,
+    organization_id: int | None = None,
     token_version: int | None = None,
     session_id: str | None = None,
     ttl: timedelta | None = None,
 ) -> str:
     """Create a signed authentication JWT (purpose: authentication)."""
     ttl = ttl or timedelta(minutes=settings.access_token_expire_minutes)
-    return _encode(
-        _base_token_claims(user_id, ACCESS_TOKEN_TYPE, ttl, token_version=token_version, session_id=session_id)
+
+    claims = _base_token_claims(
+        user_id,
+        ACCESS_TOKEN_TYPE,
+        ttl,
+        token_version=token_version,
+        session_id=session_id,
     )
+
+    if organization_id is not None:
+        claims["organization_id"] = organization_id
+
+    return _encode(claims)
 
 
 def create_refresh_token(
@@ -220,13 +233,15 @@ def create_refresh_token(
     """Create a signed session-renewal JWT (purpose: session renewal)."""
     ttl = ttl or timedelta(days=settings.refresh_token_expire_days)
     claims = _base_token_claims(
-        user_id, REFRESH_TOKEN_TYPE, ttl, token_version=token_version, session_id=session_id
+        user_id,
+        REFRESH_TOKEN_TYPE,
+        ttl,
+        token_version=token_version,
+        session_id=session_id,
     )
     if jti:
         claims["jti"] = jti
     return _encode(claims)
-
-
 def decode_token(token: str, *, expected_type: str | None = None) -> dict[str, Any]:
     """Verify signature/audience/issuer/expiry and return the claims.
 
