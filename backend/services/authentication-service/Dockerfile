@@ -24,7 +24,7 @@ WORKDIR /build
 
 COPY requirements.txt ./
 RUN python -m venv /opt/venv \
-    && /opt/venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
+    && /opt/venv/bin/python -m pip install --disable-pip-version-check --default-timeout=120 --retries=10 -r requirements.txt
 
 # ---------- Stage 2: runtime ----------
 FROM python:3.12-slim AS runtime
@@ -42,25 +42,16 @@ COPY alembic ./alembic
 COPY alembic.ini ./
 COPY app ./app
 
-# Non-root service user. UID/GID match the app data volume owner expectations.
 RUN groupadd --gid 10001 --system app \
     && useradd --uid 10001 --gid app --system --no-create-home --home-dir /app app \
     && chown -R 10001:10001 /app
 
 USER 10001:10001
 
-# The application port. Overridable at runtime via AUTHENTICATION_SERVICE_PORT
-# (e.g. from the host Compose environment).
 ENV AUTHENTICATION_SERVICE_PORT=8001
 EXPOSE 8001
 
-# Alembic migrations run at startup on the ready database (owner single
-# replica: the Compose `db` health gate + idempotent `upgrade head` make this
-# safe for this team's one-instance-per-service topology), then uvicorn serves
-# the API. Variable expansion happens inside the container shell.
 CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port \"${AUTHENTICATION_SERVICE_PORT:-8001}\""]
 
-# Liveness: /health reflects application availability only; it does not probe
-# the Notification Service or any other optional dependency.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \
   CMD ["python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:'+__import__('os').environ.get('AUTHENTICATION_SERVICE_PORT','8001')+'/health', timeout=3)"]
