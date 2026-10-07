@@ -19,7 +19,7 @@ from app.clients.contracts import (
     NTF_FORGOT_PASSWORD_OTP,
     NTF_INDIVIDUAL_REGISTRATION_OTP,
     NTF_ORGANIZATION_REGISTRATION_OTP,
-    NotificationServiceContract,
+    EmailServiceContract,
     ServiceCallError,
     ServiceResponseError,
 )
@@ -37,7 +37,7 @@ __all__ = [
 ]
 
 
-class NotificationServiceClient(NotificationServiceContract):
+class NotificationServiceClient(EmailServiceContract):
     """HTTPX-based implementation of the Notification Service contract.
 
     Communication uses the shared ``httpx.AsyncClient``; the base URL, the

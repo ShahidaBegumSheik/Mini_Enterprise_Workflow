@@ -79,8 +79,6 @@ class Settings(BaseSettings):
     # Microservice base URLs (called through the shared HTTPX client)
     user_service_url: str = "http://user-service:8002"
     tenant_admin_service_url: str = "http://tenant-admin-service:8003"
-    notification_service_url: str = "http://notification-service:8004"
-    notification_timeout_seconds: float = 30.0
 
     # SMTP email delivery
     smtp_enabled: bool = False

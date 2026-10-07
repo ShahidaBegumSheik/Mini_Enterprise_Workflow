@@ -13,7 +13,7 @@ from app.clients.contracts import (
     NTF_FORGOT_PASSWORD_OTP,
     NTF_INDIVIDUAL_REGISTRATION_OTP,
     NTF_ORGANIZATION_REGISTRATION_OTP,
-    NotificationServiceContract,
+    EmailServiceContract,
     ServiceCallError,
     ServiceResponseError,
 )
@@ -157,25 +157,25 @@ def _map_notification_error(exc: Exception) -> HTTPException:
         if 400 <= exc.status_code < 500:
             return HTTPException(
                 status_code=502,
-                detail="notification-service rejected the notification request",
+                detail="email service rejected the notification request",
             )
         return HTTPException(
             status_code=502,
-            detail=f"notification-service failed (HTTP {exc.status_code})",
+            detail=f"email service failed (HTTP {exc.status_code})",
         )
     if isinstance(exc, ServiceResponseError):
         return HTTPException(
             status_code=502,
-            detail="notification-service returned an invalid response",
+            detail="email service returned an invalid response",
         )
     if isinstance(exc, httpx.HTTPError):
         return HTTPException(
             status_code=503,
-            detail="notification-service is unreachable at this time",
+            detail="email service is unreachable at this time",
         )
     return HTTPException(
         status_code=502,
-        detail="notification-service could not deliver the notification",
+        detail="email service could not deliver the notification",
     )
 
 
@@ -194,7 +194,7 @@ class AuthService:
         repo: AuthRepository,
         users: UserServiceClient,
         tenants: TenantAdminServiceClient,
-        notifications: NotificationServiceContract,
+        notifications: EmailServiceContract,
     ) -> None:
         self.repo = repo
         self.users = users

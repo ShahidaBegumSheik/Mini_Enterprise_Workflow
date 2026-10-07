@@ -93,7 +93,7 @@ def _error_response(status_code: int, detail: str, headers: dict | None = None):
     description=(
         "Validates the registration (individual or organization), generates a numeric OTP "
         "and stores the encrypted, short-lived OTP flow inside the `otp_token` HttpOnly "
-        "cookie. The OTP email is delivered through the Notification Service. "
+        "cookie. The OTP email is delivered via email. "
         "Nothing about the account is persisted until the OTP is verified. "
         + _COOKIE_AUTH_NOTE
     ),
