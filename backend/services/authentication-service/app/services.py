@@ -268,10 +268,12 @@ class AuthService:
             ip_address=ip_address,
         )
 
-        access_token = create_access_token(
+             access_token = create_access_token(
             credential.user_id,
+            organization_id=credential.organization_id,
             token_version=credential.token_version,
             session_id=session_id,
+
         )
         refresh_token = create_refresh_token(
             credential.user_id,
